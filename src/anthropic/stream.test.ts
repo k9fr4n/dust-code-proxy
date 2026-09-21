@@ -1,0 +1,64 @@
+import { describe, it, expect } from 'vitest'
+import { DustStreamEvent } from '../dust/sse.js'
+import { StreamTranslator, isTerminalDustEvent } from './stream.js'
+
+function event(type: string, extra: Record<string, unknown> = {}): DustStreamEvent {
+  return { type, ...extra }
+}
+
+describe('StreamTranslator', () => {
+  it('emits a full text sequence', () => {
+    const translator = new StreamTranslator('msg_1', 'dust-coding-agent')
+    const events = [
+      ...translator.translate(event('generation_tokens', { text: 'Hel' })),
+      ...translator.translate(event('generation_tokens', { text: 'lo' })),
+      ...translator.translate(event('agent_message_success')),
+    ]
+    expect(events.map((e) => e.type)).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ])
+    expect(translator.text).toBe('Hello')
+    expect(translator.stopReason).toBe('end_turn')
+  })
+
+  it('emits a message even when no tokens arrive (empty response)', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    const events = translator.translate(event('agent_message_success'))
+    expect(events.map((e) => e.type)).toEqual([
+      'message_start',
+      'message_delta',
+      'message_stop',
+    ])
+  })
+
+  it('maps agent_error to an error event', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    const events = translator.translate(event('agent_error', { message: 'boom' }))
+    expect(events[0].type).toBe('error')
+    expect(translator.errored).toBe(true)
+    expect(translator.errorMessage).toBe('boom')
+  })
+
+  it('is idempotent on repeated finish', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    translator.translate(event('generation_tokens', { text: 'x' }))
+    translator.translate(event('agent_message_success'))
+    expect(translator.finishExternally()).toEqual([])
+  })
+})
+
+describe('isTerminalDustEvent', () => {
+  it('recognizes terminal events', () => {
+    expect(isTerminalDustEvent('agent_message_success')).toBe(true)
+    expect(isTerminalDustEvent('agent_message_gracefully_stopped')).toBe(true)
+    expect(isTerminalDustEvent('agent_error')).toBe(true)
+    expect(isTerminalDustEvent('generation_tokens')).toBe(false)
+    expect(isTerminalDustEvent('tool_call_started')).toBe(false)
+  })
+})

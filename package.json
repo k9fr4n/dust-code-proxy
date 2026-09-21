@@ -1,0 +1,31 @@
+{
+  "name": "dust-code-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Proxy translating Claude Code CLI requests into Dust AI API calls (OAuth login, conversations, SSE streaming).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts serve",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js serve",
+    "serve": "node dist/index.js serve",
+    "login": "tsx src/index.ts login",
+    "logout": "tsx src/index.ts logout",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^5.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  }
+}

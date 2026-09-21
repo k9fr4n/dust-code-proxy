@@ -1,0 +1,25 @@
+services:
+  proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - dust-credentials:/data
+    environment:
+      DUST_OAUTH_CLIENT_ID: ${DUST_OAUTH_CLIENT_ID:-client_01JGCT55T7FVDG9XF74925R1KT}
+      DUST_CREDENTIAL_FILE: /data/dust-credentials.json
+      DUST_BASE_URL: ${DUST_BASE_URL:-https://dust.tt}
+      DUST_SPACE_ID: ${DUST_SPACE_ID:-}
+      DUST_DEFAULT_AGENT_CONFIGURATION_ID: ${DUST_DEFAULT_AGENT_CONFIGURATION_ID:-}
+      DUST_FORWARD_SYSTEM: ${DUST_FORWARD_SYSTEM:-true}
+      PROXY_API_KEYS: ${PROXY_API_KEYS:-local-proxy-key}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  dust-credentials:
