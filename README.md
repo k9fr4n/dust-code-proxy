@@ -5,9 +5,10 @@ Messages d'Anthropic vers l'API Dust (OAuth device-code, conversations, streamin
 SSE en deux temps), pour lancer Claude Code avec `ANTHROPIC_BASE_URL` pointé vers
 ce proxy.
 
-> Périmètre : le MVP couvre les étapes 0→4 (login, conversation, streaming, mapping
-> de modèles). Le pont d'outils MCP (`mcp/register` / `mcp/requests` / `mcp/results`)
-> est l'étape 5, **non incluse** : le proxy est donc en mode texte seul pour l'instant.
+> Périmètre : le proxy couvre les étapes 0→5 (login, conversation, streaming, mapping
+> de modèles, et pont d'outils MCP). Le pont MCP déclare les outils locaux de Claude
+> Code (`Bash`, `Read`, `Write`, `Grep`, …) sur un serveur MCP enregistré auprès de
+> Dust, afin que l'agent Dust puisse les invoquer en cours de tour.
 
 ## Démarrage rapide
 
@@ -49,6 +50,9 @@ claude -p "Reply with OK only."
 | `DUST_SPACE_ID` | *(vide)* | `spaceId` optionnel pour les workspaces organisés par espaces. |
 | `DUST_DEFAULT_AGENT_CONFIGURATION_ID` | *(vide)* | Agent utilisé si un modèle n'est pas dans `models.json`. |
 | `DUST_FORWARD_SYSTEM` | `true` | Prépender le champ `system` de Claude Code au contenu du message. |
+| `DUST_MCP_SERVER_NAME` | `claude-code-proxy` | Nom du serveur MCP enregistré auprès de Dust (5–30 caractères). |
+| `DUST_MCP_HEARTBEAT_INTERVAL_MS` | `240000` | Période du heartbeat MCP (Dust impose ≤ 5 min ; marge de sécurité). |
+| `DUST_MCP_RECONNECT_DELAY_MS` | `5000` | Délai de reconnexion du flux SSE `mcp/requests`. |
 | `INTERNAL_TOKEN` | *(vide)* | Active les endpoints `/internal/*` si défini. |
 | `PORT` | `8080` | Port d'écoute. |
 
@@ -100,6 +104,26 @@ export ANTHROPIC_API_KEY="local-proxy-key"
 claude --append-system-prompt ""   # (exemple) ou transmettre x-dust-session via un proxy intermédiaire
 ```
 
+## Pont d'outils MCP (étape 5)
+
+Quand une requête `/v1/messages` contient un tableau `tools` non vide (en mode
+streaming), le proxy déclare ces outils sur un serveur MCP enregistré auprès de Dust
+(`mcp/register`), en passant `clientSideMCPServerIds` dans le contexte du message.
+Pendant le tour :
+
+1. Dust appelle un outil via le flux SSE `mcp/requests` (`tools/call`) ;
+2. le proxy relaie l'appel à Claude Code sous forme de bloc `tool_use`, puis clôture
+   le tour avec `stop_reason: tool_use` — **sans** annuler la génération Dust ;
+3. Claude Code exécute l'outil localement et renvoie un bloc `tool_result` dans sa
+   requête suivante ;
+4. le proxy poste le résultat à Dust via `mcp/results` et reprend le streaming du
+   même message Dust (`lastEventId`) pour émettre la suite.
+
+Le transport implémente le heartbeat (ré-enregistrement immédiat en cas d'échec) et
+la reconnexion indéfinie du flux SSE sur erreur. La validation des `input_schema` des
+outils se fait par conversion JSON-Schema → Zod (sous-ensemble courant ; repli vers un
+objet libre pour les schémas exotiques).
+
 ## Erreurs et annulation
 
 Les erreurs sont renvoyées au format Anthropic (`{"type":"error","error":{...}}`).
@@ -116,10 +140,10 @@ npm run build
 npm run dev            # serveur en watch (tsx)
 ```
 
-## Limites connues (MVP)
+## Limites connues
 
-- Mode texte uniquement : les blocs `tool_use`/`tool_result`/`image`/`document` sont
-  refusés en entrée (le pont MCP est l'étape 5).
+- Les blocs `image`/`document` (contenu non-textuel autre que les outils) restent
+  refusés en entrée. Les tours `tool_result` nécessitent le mode streaming.
 - Les métriques de tokens sont renvoyées à `0` (Dust ne les expose pas au format
   Anthropic).
 - `generation_tokens.classification` est pour l'instant mappé en texte simple (le

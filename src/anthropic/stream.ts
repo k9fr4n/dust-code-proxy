@@ -36,6 +36,7 @@ export class StreamTranslator {
   private messageStarted = false
   private blockOpen = false
   private finished = false
+  private textBlockEmitted = false
 
   constructor(
     private readonly messageId: string,
@@ -79,6 +80,40 @@ export class StreamTranslator {
     return [{ type: 'error', error: { type: 'api_error', message } }]
   }
 
+  // Emits a `tool_use` content block and ends the turn with `stop_reason: tool_use`.
+  // Called by the MCP bridge when a Dust `tools/call` is relayed to Claude Code.
+  emitToolUse(toolUseId: string, name: string, input: unknown): AnthropicStreamEvent[] {
+    // A turn already ended (end_turn/error) cannot also emit a tool_use.
+    if (this.finished) return []
+    const out: AnthropicStreamEvent[] = []
+    if (!this.messageStarted) {
+      out.push(this.messageStart())
+      this.messageStarted = true
+    }
+    if (this.blockOpen) {
+      out.push({ type: 'content_block_stop', index: 0 })
+      this.blockOpen = false
+    }
+    const index = this.textBlockEmitted ? 1 : 0
+    out.push({
+      type: 'content_block_start',
+      index,
+      content_block: { type: 'tool_use', id: toolUseId, name, input },
+    })
+    out.push({ type: 'content_block_stop', index })
+    if (!this.finished) {
+      this.stopReason = 'tool_use'
+      out.push({
+        type: 'message_delta',
+        delta: { stop_reason: 'tool_use', stop_sequence: null },
+        usage: { output_tokens: 0 },
+      })
+      out.push({ type: 'message_stop' })
+      this.finished = true
+    }
+    return out
+  }
+
   private onText(text: string): AnthropicStreamEvent[] {
     const out: AnthropicStreamEvent[] = []
     if (!this.messageStarted) {
@@ -92,6 +127,7 @@ export class StreamTranslator {
         content_block: { type: 'text', text: '' },
       })
       this.blockOpen = true
+      this.textBlockEmitted = true
     }
     if (text) {
       this.text += text

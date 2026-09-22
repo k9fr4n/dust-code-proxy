@@ -21,6 +21,9 @@ export interface Config {
   dustDefaultAgentConfigurationId: string | undefined
   dustForwardSystem: boolean
   modelsFile: string
+  mcpServerName: string
+  mcpHeartbeatIntervalMs: number
+  mcpReconnectDelayMs: number
   timeouts: TimeoutConfig
 }
 
@@ -60,6 +63,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       env.DUST_DEFAULT_AGENT_CONFIGURATION_ID || undefined,
     dustForwardSystem: boolValue(env.DUST_FORWARD_SYSTEM, true),
     modelsFile: env.MODELS_FILE ?? './models.json',
+    mcpServerName: env.DUST_MCP_SERVER_NAME ?? 'claude-code-proxy',
+    mcpHeartbeatIntervalMs: intValue(env.DUST_MCP_HEARTBEAT_INTERVAL_MS, 4 * 60 * 1000),
+    mcpReconnectDelayMs: intValue(env.DUST_MCP_RECONNECT_DELAY_MS, 5 * 1000),
     timeouts: {
       connectMs: intValue(env.DUST_CONNECT_TIMEOUT_MS, 10000),
       createMessageMs: intValue(env.DUST_CREATE_MESSAGE_TIMEOUT_MS, 30000),

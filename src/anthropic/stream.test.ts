@@ -51,6 +51,42 @@ describe('StreamTranslator', () => {
     translator.translate(event('agent_message_success'))
     expect(translator.finishExternally()).toEqual([])
   })
+
+  it('emitToolUse emits a tool_use block and ends the turn', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    translator.translate(event('generation_tokens', { text: 'thinking' }))
+    const events = translator.emitToolUse('toolu_1', 'bash', { command: 'ls' })
+    expect(events.map((e) => e.type)).toEqual([
+      'content_block_stop',
+      'content_block_start',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ])
+    const start = events[1] as { type: 'content_block_start'; content_block: Record<string, unknown> }
+    expect(start.content_block).toMatchObject({
+      type: 'tool_use',
+      id: 'toolu_1',
+      name: 'bash',
+      input: { command: 'ls' },
+    })
+    expect(translator.stopReason).toBe('tool_use')
+    expect(translator.isFinished()).toBe(true)
+  })
+
+  it('emitToolUse emits message_start when no text preceded it', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    const events = translator.emitToolUse('toolu_2', 'grep', {})
+    expect(events[0].type).toBe('message_start')
+    expect(events.map((e) => e.type)).toContain('content_block_start')
+    expect(translator.isFinished()).toBe(true)
+  })
+
+  it('emitToolUse is idempotent after finish', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    translator.translate(event('agent_message_success'))
+    expect(translator.emitToolUse('toolu_3', 'x', {})).toEqual([])
+  })
 })
 
 describe('isTerminalDustEvent', () => {
