@@ -9,6 +9,9 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
     bodyLimit: 32 * 1024 * 1024,
   })
 
+  ctx.logger = app.log
+  ctx.dust.logger = app.log
+
   app.setErrorHandler((err: any, request, reply) => {
     if (err instanceof ProxyError) {
       reply.status(err.status).send(anthropicErrorBody(err.type, err.message))

@@ -44,6 +44,8 @@ interface MessageContext {
 export class DustClient {
   private creds: Credentials | null = null
   private refreshInFlight: Promise<void> | null = null
+  // Assigned by `buildServer`; stream-level failures happen outside any request.
+  logger?: { warn?: (...args: unknown[]) => void }
 
   constructor(
     private readonly config: Config,
@@ -218,6 +220,11 @@ export class DustClient {
         context: this.messageContext(message.clientSideMCPServerIds),
       },
       blocking: false,
+      // Client-side MCP tools need the validation→approval round trip to resume
+      // the agent generation after the tool result. Skipping it here parks the
+      // loop at `blocked_validation_required` with nobody to approve, and forcing
+      // `skipToolsValidation: true` makes the generation cancel after the result.
+      // So leave the default and approve the `tool_approve_execution` event.
       skipToolsValidation: false,
     }
     // The Dust API rejects `null` for these optional fields (Zod: string/object/array
@@ -341,24 +348,65 @@ export class DustClient {
     return this.stream(url, opts)
   }
 
+  // A Dust generation can stall indefinitely (e.g. a tool call parked server-side),
+  // leaving the client hanging on an open stream. `idleStreamMs` bounds the gap
+  // between two events: when it elapses we abort the fetch and surface an error so
+  // the caller can always emit a terminal frame.
   private async *stream(
     url: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<ParsedDustEvent> {
     const token = await this.ensureFreshToken()
-    const res = await fetch(url, {
-      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
-      signal: opts?.signal,
-    })
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => '')
-      throw new ProxyError(
-        'api_error',
-        `Dust SSE stream failed (${res.status}): ${text.slice(0, 300)}`,
-        502,
-      )
+    const idleMs = this.config.timeouts.idleStreamMs
+    const controller = new AbortController()
+    const onOuterAbort = () => controller.abort()
+    if (opts?.signal?.aborted) controller.abort()
+    else opts?.signal?.addEventListener('abort', onOuterAbort, { once: true })
+
+    let idleTimer: NodeJS.Timeout | null = null
+    let idleElapsed = false
+    const armIdle = () => {
+      if (idleMs <= 0) return
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        idleElapsed = true
+        this.logger?.warn?.({ url, idleMs }, 'Dust stream idle timeout; aborting')
+        controller.abort()
+      }, idleMs)
     }
-    yield* streamSse(res.body, opts)
+
+    try {
+      armIdle()
+      const res = await fetch(url, {
+        headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '')
+        throw new ProxyError(
+          'api_error',
+          `Dust SSE stream failed (${res.status}): ${text.slice(0, 300)}`,
+          502,
+        )
+      }
+      for await (const event of streamSse(res.body, { signal: controller.signal })) {
+        armIdle()
+        yield event
+      }
+    } catch (err) {
+      // Our own idle abort must not look like a caller-driven cancellation.
+      if (idleElapsed && !opts?.signal?.aborted) {
+        throw new ProxyError(
+          'api_error',
+          `No Dust event received for ${idleMs}ms; stream aborted.`,
+          504,
+        )
+      }
+      throw err
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer)
+      opts?.signal?.removeEventListener('abort', onOuterAbort)
+    }
   }
 
   private async *streamMcp(
@@ -381,16 +429,40 @@ export class DustClient {
     yield* streamMcpRequests(res.body, opts)
   }
 
-  async cancel(conversationId: string): Promise<void> {
+  // Dust requires the agent messages to stop in the body; a bodyless POST is
+  // rejected with 400 "Malformed JSON in request body". Errors are raised, not
+  // swallowed, so the caller can log why a cancellation did not take effect.
+  async cancel(conversationId: string, agentMessageId: string): Promise<void> {
     const ws = this.workspaceId()
-    try {
-      await this.request(
-        `/api/v1/w/${ws}/assistant/conversations/${conversationId}/cancel`,
-        { method: 'POST' },
-        10000,
-      )
-    } catch {
-      // best-effort cancellation
+    const res = await this.request(
+      `/api/v1/w/${ws}/assistant/conversations/${conversationId}/cancel`,
+      { method: 'POST', body: JSON.stringify({ messageIds: [agentMessageId] }) },
+      10000,
+    )
+    if (!res.ok) {
+      const json = await res.json().catch(() => null)
+      throw this.mapDustError(res.status, json)
+    }
+  }
+
+  // Approve (or reject) a pending tool execution. Client-side MCP tools arrive as
+  // `blocked_validation_required` with a `tool_approve_execution` event; approving
+  // is what resumes the agent loop and dispatches `tools/call` to our bridge.
+  async validateAction(
+    conversationId: string,
+    messageId: string,
+    actionId: string,
+    approved: 'approved' | 'rejected' | 'always_approved',
+  ): Promise<void> {
+    const ws = this.workspaceId()
+    const res = await this.request(
+      `/api/v1/w/${ws}/assistant/conversations/${conversationId}/messages/${messageId}/validate-action`,
+      { method: 'POST', body: JSON.stringify({ actionId, approved }) },
+      10000,
+    )
+    if (!res.ok) {
+      const json = await res.json().catch(() => null)
+      throw this.mapDustError(res.status, json)
     }
   }
 

@@ -181,7 +181,9 @@ async function ensureMcpBridge(
   if (tools.length === 0) return []
   let bridge = session.mcp as SessionMcp | undefined
   if (!bridge) {
-    bridge = new SessionMcp(ctx.dust, ctx.config)
+    // Without a logger the transport's `onError` goes nowhere, so a bridge that
+    // fails to register or relay produces no trace at all.
+    bridge = new SessionMcp(ctx.dust, ctx.config, ctx.logger)
     session.mcp = bridge
   }
   await bridge.start(tools)
@@ -214,7 +216,11 @@ async function streamTurn(
 
   const disconnect = new AbortController()
   const onClose = () => disconnect.abort()
-  request.raw.on('close', onClose)
+  // The request `close` event fires as soon as the body is consumed (before any
+  // streaming), which aborts the turn immediately on the tool-result resume. The
+  // socket `close` fires only on a real TCP disconnect.
+  const socket = request.raw.socket
+  socket.on('close', onClose)
 
   const translator = new StreamTranslator(messageId, model)
   const bridge = session.mcp as SessionMcp | undefined
@@ -241,6 +247,21 @@ async function streamTurn(
       if (event.kind === 'done') break
       if (event.kind !== 'event') continue
       if (event.eventId) session.lastEventId = event.eventId
+
+      // A client-side MCP tool call first surfaces as a validation request. Approve
+      // it so Dust dispatches `tools/call` to the bridge, which then emits `tool_use`.
+      if (event.type === 'tool_approve_execution') {
+        const actionId = event.data.actionId
+        const messageId = event.data.messageId
+        if (typeof actionId === 'string' && typeof messageId === 'string') {
+          await ctx.dust.validateAction(conversationId, messageId, actionId, 'approved')
+          request.log.info({ actionId }, 'Approved client-side MCP tool execution')
+        } else {
+          request.log.warn({ event: event.data }, 'tool_approve_execution missing ids')
+        }
+        continue
+      }
+
       const frames = translator.translate(event.data)
       for (const frame of frames) reply.raw.write(serializeSse(frame))
       if (translator.isFinished()) break
@@ -257,7 +278,12 @@ async function streamTurn(
     } else if (disconnect.signal.aborted) {
       interrupted = true
       // Client disconnected: cancel the Dust generation.
-      await ctx.dust.cancel(conversationId).catch(() => {})
+      request.log.info({ conversationId, agentMessageId }, 'Client disconnected; cancelling Dust generation')
+      await ctx.dust
+        .cancel(conversationId, agentMessageId)
+        .catch((cancelErr) =>
+          request.log.warn({ err: cancelErr }, 'Failed to cancel Dust generation'),
+        )
     } else {
       for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
         reply.raw.write(serializeSse(frame))
@@ -265,7 +291,7 @@ async function streamTurn(
     }
   } finally {
     bridge?.setEmitter(null)
-    request.raw.off('close', onClose)
+    socket.off('close', onClose)
     if (interrupted) {
       request.raw.destroy()
     } else {
@@ -409,7 +435,15 @@ export function buildMessagesHandler(ctx: ServerContext) {
       }
       for (const tr of toolResults) {
         if (!tr.tool_use_id) continue
-        bridge.resolveToolResult(tr.tool_use_id, tr.content, tr.is_error === true)
+        const matched = bridge.resolveToolResult(
+          tr.tool_use_id,
+          tr.content,
+          tr.is_error === true,
+        )
+        request.log.debug(
+          { toolUseId: tr.tool_use_id, matched },
+          'tool_result received for parked Dust tool call',
+        )
       }
       await streamTurn(
         ctx,
