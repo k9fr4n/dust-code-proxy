@@ -42,7 +42,7 @@ export function parseDustData(data: string): ParsedDustEvent | null {
   }
 }
 
-export function parseSseBlock(block: string): ParsedDustEvent | null {
+function collectDataLines(block: string): string[] {
   const dataLines: string[] = []
   for (const rawLine of block.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
@@ -55,14 +55,50 @@ export function parseSseBlock(block: string): ParsedDustEvent | null {
     if (field === 'data') dataLines.push(value)
     // `event`, `id`, `retry` fields are ignored: the type is carried in the JSON.
   }
+  return dataLines
+}
+
+export function parseSseBlock(block: string): ParsedDustEvent | null {
+  const dataLines = collectDataLines(block)
   if (dataLines.length === 0) return null
   return parseDustData(dataLines.join('\n'))
 }
 
-export async function* streamSse(
+// The MCP requests stream (`GET mcp/requests`) uses the same envelope shape but
+// carries a raw JSON-RPC message in `data` (no `type` field), so it needs its own
+// parser distinct from `parseDustData`.
+export type ParsedMcpRequest =
+  | { kind: 'event'; eventId: string; data: Record<string, unknown> }
+  | { kind: 'done' }
+  | { kind: 'unknown'; raw: string }
+
+export function parseMcpRequestData(data: string): ParsedMcpRequest | null {
+  const trimmed = data.trim()
+  if (trimmed === '') return null
+  if (trimmed === 'done') return { kind: 'done' }
+  try {
+    const obj = JSON.parse(trimmed) as { eventId?: unknown; data?: unknown }
+    const eventId = typeof obj.eventId === 'string' ? obj.eventId : ''
+    if (obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
+      return { kind: 'event', eventId, data: obj.data as Record<string, unknown> }
+    }
+    return { kind: 'unknown', raw: trimmed }
+  } catch {
+    return { kind: 'unknown', raw: trimmed }
+  }
+}
+
+export function parseMcpSseBlock(block: string): ParsedMcpRequest | null {
+  const dataLines = collectDataLines(block)
+  if (dataLines.length === 0) return null
+  return parseMcpRequestData(dataLines.join('\n'))
+}
+
+async function* streamSseRaw<T>(
   body: ReadableStream<Uint8Array>,
-  opts?: { signal?: AbortSignal },
-): AsyncGenerator<ParsedDustEvent> {
+  opts: { signal?: AbortSignal } | undefined,
+  parseBlock: (block: string) => T | null,
+): AsyncGenerator<T> {
   const decoder = new TextDecoder()
   const reader = body.getReader()
   let buffer = ''
@@ -75,13 +111,13 @@ export async function* streamSse(
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const block = buffer.slice(0, idx)
         buffer = buffer.slice(idx + 2)
-        const event = parseSseBlock(block)
+        const event = parseBlock(block)
         if (event) yield event
       }
     }
     const remaining = buffer.replace(/\r/g, '')
     if (remaining.trim() !== '') {
-      const event = parseSseBlock(remaining)
+      const event = parseBlock(remaining)
       if (event) yield event
     }
   } finally {
@@ -91,4 +127,18 @@ export async function* streamSse(
       // ignore
     }
   }
+}
+
+export async function* streamSse(
+  body: ReadableStream<Uint8Array>,
+  opts?: { signal?: AbortSignal },
+): AsyncGenerator<ParsedDustEvent> {
+  yield* streamSseRaw(body, opts, parseSseBlock)
+}
+
+export async function* streamMcpRequests(
+  body: ReadableStream<Uint8Array>,
+  opts?: { signal?: AbortSignal },
+): AsyncGenerator<ParsedMcpRequest> {
+  yield* streamSseRaw(body, opts, parseMcpSseBlock)
 }

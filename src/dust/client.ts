@@ -13,11 +13,17 @@ import {
   findAgentMessageId,
   findSid,
 } from './parse.js'
-import { ParsedDustEvent, streamSse } from './sse.js'
+import { ParsedDustEvent, ParsedMcpRequest, streamSse, streamMcpRequests } from './sse.js'
+import {
+  registerMcpResponseSchema,
+  heartbeatMcpResponseSchema,
+  postMcpResultsResponseSchema,
+} from './mcp.js'
 
 export interface PostMessageInput {
   content: string
   agentConfigurationId: string
+  clientSideMCPServerIds?: string[]
 }
 
 export interface ConversationResult {
@@ -133,14 +139,14 @@ export class DustClient {
     }
   }
 
-  private messageContext(): MessageContext {
+  private messageContext(clientSideMCPServerIds?: string[]): MessageContext {
     return {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       username: this.creds?.username ?? 'proxy',
       fullName: this.creds?.fullName ?? this.creds?.username ?? 'proxy',
       email: this.creds?.email ?? '',
       origin: 'claude-code-proxy',
-      clientSideMCPServerIds: null,
+      clientSideMCPServerIds: clientSideMCPServerIds ?? null,
     }
   }
 
@@ -209,7 +215,7 @@ export class DustClient {
       message: {
         content: message.content,
         mentions: [{ configurationId: message.agentConfigurationId }],
-        context: this.messageContext(),
+        context: this.messageContext(message.clientSideMCPServerIds),
       },
       contentFragment: null,
       contentFragments: null,
@@ -235,7 +241,7 @@ export class DustClient {
     const body = {
       content: message.content,
       mentions: [{ configurationId: message.agentConfigurationId }],
-      context: this.messageContext(),
+      context: this.messageContext(message.clientSideMCPServerIds),
     }
     const res = await this.request(
       `/api/v1/w/${ws}/assistant/conversations/${conversationId}/messages`,
@@ -353,6 +359,26 @@ export class DustClient {
     yield* streamSse(res.body, opts)
   }
 
+  private async *streamMcp(
+    url: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<ParsedMcpRequest> {
+    const token = await this.ensureFreshToken()
+    const res = await fetch(url, {
+      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
+      signal: opts?.signal,
+    })
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '')
+      throw new ProxyError(
+        'api_error',
+        `Dust MCP stream failed (${res.status}): ${text.slice(0, 300)}`,
+        502,
+      )
+    }
+    yield* streamMcpRequests(res.body, opts)
+  }
+
   async cancel(conversationId: string): Promise<void> {
     const ws = this.workspaceId()
     try {
@@ -364,6 +390,85 @@ export class DustClient {
     } catch {
       // best-effort cancellation
     }
+  }
+
+  async registerMcpServer(
+    serverName: string,
+  ): Promise<{ serverId: string; expiresAt: string }> {
+    const ws = this.workspaceId()
+    const res = await this.request(
+      `/api/v1/w/${ws}/mcp/register`,
+      { method: 'POST', body: JSON.stringify({ serverName }) },
+      this.config.timeouts.createMessageMs,
+    )
+    const json = await res.json().catch(() => null)
+    if (!res.ok) throw this.mapDustError(res.status, json)
+    const parsed = registerMcpResponseSchema.safeParse(json)
+    if (!parsed.success) {
+      throw new ProxyError(
+        'api_error',
+        `Unexpected mcp/register response: ${JSON.stringify(json)}`,
+        502,
+      )
+    }
+    return parsed.data
+  }
+
+  async heartbeatMcpServer(
+    serverId: string,
+  ): Promise<{ success: boolean; expiresAt: string }> {
+    const ws = this.workspaceId()
+    const res = await this.request(
+      `/api/v1/w/${ws}/mcp/heartbeat`,
+      { method: 'POST', body: JSON.stringify({ serverId }) },
+      this.config.timeouts.createMessageMs,
+    )
+    const json = await res.json().catch(() => null)
+    if (!res.ok) throw this.mapDustError(res.status, json)
+    const parsed = heartbeatMcpResponseSchema.safeParse(json)
+    if (!parsed.success) {
+      throw new ProxyError(
+        'api_error',
+        `Unexpected mcp/heartbeat response: ${JSON.stringify(json)}`,
+        502,
+      )
+    }
+    return parsed.data
+  }
+
+  async postMcpResult(
+    serverId: string,
+    result: unknown,
+  ): Promise<{ success: boolean }> {
+    const ws = this.workspaceId()
+    const res = await this.request(
+      `/api/v1/w/${ws}/mcp/results`,
+      { method: 'POST', body: JSON.stringify({ serverId, result }) },
+      this.config.timeouts.createMessageMs,
+    )
+    const json = await res.json().catch(() => null)
+    if (!res.ok) throw this.mapDustError(res.status, json)
+    const parsed = postMcpResultsResponseSchema.safeParse(json)
+    if (!parsed.success) {
+      throw new ProxyError(
+        'api_error',
+        `Unexpected mcp/results response: ${JSON.stringify(json)}`,
+        502,
+      )
+    }
+    return parsed.data
+  }
+
+  streamMcpRequests(
+    serverId: string,
+    lastEventId?: string | null,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<ParsedMcpRequest> {
+    const ws = this.workspaceId()
+    const params = new URLSearchParams({ serverId })
+    if (lastEventId) params.set('lastEventId', lastEventId)
+    const url = `${this.baseUrl()}/api/v1/w/${ws}/mcp/requests?${params.toString()}`
+    return this.streamMcp(url, opts)
   }
 
   private mapDustError(status: number, json: unknown): ProxyError {

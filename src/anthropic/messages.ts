@@ -4,11 +4,13 @@ import { z } from 'zod'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
 import { Session } from '../sessions.js'
+import { SessionMcp } from '../mcp/bridge.js'
 import {
   StreamTranslator,
   serializeSse,
   isTerminalDustEvent,
 } from './stream.js'
+import { AnthropicTool } from './tools.js'
 
 interface ContentBlock {
   type: string
@@ -57,6 +59,52 @@ function hasUnsupportedBlocks(content: string | ContentBlock[]): boolean {
   return content.some((block) => block.type !== 'text')
 }
 
+interface ToolResultBlock {
+  tool_use_id?: string
+  content?: unknown
+  is_error?: boolean
+}
+
+// A `tool_result` turn ends the current assistant message with the result(s) of the
+// local tools Claude Code just ran. `content` is either the string result or an
+// array of content blocks; we hand it through raw and let the bridge stringify it.
+function extractToolResults(content: string | ContentBlock[]): ToolResultBlock[] {
+  if (typeof content === 'string') return []
+  const results: ToolResultBlock[] = []
+  for (const block of content) {
+    const b = block as unknown as Record<string, unknown>
+    if (b.type !== 'tool_result') continue
+    results.push({
+      tool_use_id: typeof b.tool_use_id === 'string' ? b.tool_use_id : undefined,
+      content: b.content,
+      is_error: b.is_error === true,
+    })
+  }
+  return results
+}
+
+// Coerce the free-form `tools[]` into the narrow shape the bridge needs. Anything
+// that lacks a `name` is dropped; malformed `input_schema` falls back to `undefined`
+// and the bridge's `jsonSchemaToZod` maps it to a loose record.
+function parseTools(tools: unknown): AnthropicTool[] {
+  if (!Array.isArray(tools)) return []
+  const out: AnthropicTool[] = []
+  for (const t of tools) {
+    if (!t || typeof t !== 'object') continue
+    const o = t as Record<string, unknown>
+    if (typeof o.name !== 'string') continue
+    out.push({
+      name: o.name,
+      description: typeof o.description === 'string' ? o.description : undefined,
+      input_schema:
+        o.input_schema && typeof o.input_schema === 'object'
+          ? (o.input_schema as Record<string, unknown>)
+          : undefined,
+    })
+  }
+  return out
+}
+
 function getApiKey(request: FastifyRequest): string | undefined {
   const xApiKey = request.headers['x-api-key']
   if (typeof xApiKey === 'string') return xApiKey
@@ -82,6 +130,7 @@ async function prepareMessage(
   configurationId: string,
   content: string,
   title: string,
+  clientSideMCPServerIds?: string[],
 ): Promise<{ conversationId: string; agentMessageId: string }> {
   let conversationId = session.conversationId
   let agentMessageId: string | undefined
@@ -91,6 +140,7 @@ async function prepareMessage(
     const result = await ctx.dust.createConversation(title, {
       content,
       agentConfigurationId: configurationId,
+      clientSideMCPServerIds,
     })
     conversationId = result.conversationId
     if (!conversationId) {
@@ -104,6 +154,7 @@ async function prepareMessage(
     const result = await ctx.dust.postMessage(conversationId, {
       content,
       agentConfigurationId: configurationId,
+      clientSideMCPServerIds,
     })
     agentMessageId = result.agentMessageId
     userMessageId = result.userMessageId
@@ -112,7 +163,115 @@ async function prepareMessage(
   if (!agentMessageId) {
     agentMessageId = await ctx.dust.resolveAgentMessageId(conversationId, userMessageId)
   }
+
+  // Persist the assistant message being streamed and reset the resume cursor: each
+  // new user turn starts a fresh agent message.
+  session.agentMessageId = agentMessageId
+  session.lastEventId = undefined
   return { conversationId, agentMessageId }
+}
+
+// Start (or re-declare) the session's MCP bridge and return the live serverId, if
+// any, to pass as `clientSideMCPServerIds` on the posted message.
+async function ensureMcpBridge(
+  ctx: ServerContext,
+  session: Session,
+  tools: AnthropicTool[],
+): Promise<string[]> {
+  if (tools.length === 0) return []
+  let bridge = session.mcp as SessionMcp | undefined
+  if (!bridge) {
+    bridge = new SessionMcp(ctx.dust, ctx.config)
+    session.mcp = bridge
+  }
+  await bridge.start(tools)
+  return bridge.id ? [bridge.id] : []
+}
+
+// Stream a single turn to the client. The bridge (when present) is wired as the
+// active emitter so a Dust `tools/call` becomes a `tool_use` block that ends this
+// response with `stop_reason: tool_use` — while the Dust generation stays parked,
+// awaiting the tool result (so it is *not* cancelled here).
+async function streamTurn(
+  ctx: ServerContext,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  model: string,
+  conversationId: string,
+  agentMessageId: string,
+  session: Session,
+  resumeLastEventId?: string,
+): Promise<void> {
+  const messageId = randomId('msg')
+
+  reply.hijack()
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+
+  const disconnect = new AbortController()
+  const onClose = () => disconnect.abort()
+  request.raw.on('close', onClose)
+
+  const translator = new StreamTranslator(messageId, model)
+  const bridge = session.mcp as SessionMcp | undefined
+  let toolUseEnded = false
+  let interrupted = false
+
+  bridge?.setEmitter({
+    emitToolUse(toolUseId, name, input) {
+      for (const frame of translator.emitToolUse(toolUseId, name, input)) {
+        reply.raw.write(serializeSse(frame))
+      }
+      toolUseEnded = true
+      // Stop reading the message events stream: the agent is now waiting on the
+      // tool result. Do NOT cancel — the tool-result turn resumes this stream.
+      disconnect.abort()
+    },
+  })
+
+  try {
+    for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
+      lastEventId: resumeLastEventId,
+      signal: disconnect.signal,
+    })) {
+      if (event.kind === 'done') break
+      if (event.kind !== 'event') continue
+      if (event.eventId) session.lastEventId = event.eventId
+      const frames = translator.translate(event)
+      for (const frame of frames) reply.raw.write(serializeSse(frame))
+      if (translator.isFinished()) break
+      if (isTerminalDustEvent(event.type)) break
+    }
+    if (!translator.isFinished()) {
+      for (const frame of translator.finishExternally()) {
+        reply.raw.write(serializeSse(frame))
+      }
+    }
+  } catch (err) {
+    if (toolUseEnded) {
+      // Ended by tool_use; the generation is parked, not cancelled.
+    } else if (disconnect.signal.aborted) {
+      interrupted = true
+      // Client disconnected: cancel the Dust generation.
+      await ctx.dust.cancel(conversationId).catch(() => {})
+    } else {
+      for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
+        reply.raw.write(serializeSse(frame))
+      }
+    }
+  } finally {
+    bridge?.setEmitter(null)
+    request.raw.off('close', onClose)
+    if (interrupted) {
+      request.raw.destroy()
+    } else {
+      reply.raw.end()
+    }
+  }
 }
 
 async function handleStream(
@@ -124,63 +283,18 @@ async function handleStream(
   content: string,
   title: string,
   session: Session,
+  tools: AnthropicTool[],
 ): Promise<void> {
+  const serverIds = await ensureMcpBridge(ctx, session, tools)
   const { conversationId, agentMessageId } = await prepareMessage(
     ctx,
     session,
     configurationId,
     content,
     title,
+    serverIds,
   )
-  const messageId = randomId('msg')
-
-  reply.hijack()
-  reply.raw.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  })
-
-  const abort = new AbortController()
-  const onClose = () => abort.abort()
-  request.raw.on('close', onClose)
-
-  const translator = new StreamTranslator(messageId, model)
-  let interrupted = false
-  try {
-    for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
-      signal: abort.signal,
-    })) {
-      if (event.kind === 'done') break
-      if (event.kind !== 'event') continue
-      const frames = translator.translate(event)
-      for (const frame of frames) reply.raw.write(serializeSse(frame))
-      if (isTerminalDustEvent(event.type)) break
-    }
-    if (!translator.isFinished()) {
-      for (const frame of translator.finishExternally()) {
-        reply.raw.write(serializeSse(frame))
-      }
-    }
-  } catch (err) {
-    if (abort.signal.aborted) {
-      interrupted = true
-      // Client disconnected: cancel the Dust generation.
-      await ctx.dust.cancel(conversationId).catch(() => {})
-    } else {
-      for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
-        reply.raw.write(serializeSse(frame))
-      }
-    }
-  } finally {
-    request.raw.off('close', onClose)
-    if (interrupted) {
-      request.raw.destroy()
-    } else {
-      reply.raw.end()
-    }
-  }
+  await streamTurn(ctx, request, reply, model, conversationId, agentMessageId, session)
 }
 
 async function handleNonStream(
@@ -204,6 +318,7 @@ async function handleNonStream(
   for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId)) {
     if (event.kind === 'done') break
     if (event.kind !== 'event') continue
+    if (event.eventId) session.lastEventId = event.eventId
     translator.translate(event)
     if (isTerminalDustEvent(event.type)) break
   }
@@ -257,6 +372,58 @@ export function buildMessagesHandler(ctx: ServerContext) {
     if (!lastUser) {
       throw new ProxyError('invalid_request_error', 'No user message found in the request.', 400)
     }
+
+    const sessionKey = resolveSessionKey(request, body)
+    let session = ctx.sessions.get(sessionKey)
+    if (!session) {
+      session = ctx.sessions.create(sessionKey, apiKey, ctx.dust.workspaceId())
+    }
+    ctx.sessions.touch(session)
+
+    const toolResults = extractToolResults(lastUser.content)
+
+    if (toolResults.length > 0) {
+      // Tool-result turn: resolve the parked calls and resume the parked Dust
+      // generation from where the previous turn ended — no new user message.
+      if (body.stream !== true) {
+        throw new ProxyError(
+          'invalid_request_error',
+          'Tool-result continuation requires streaming.',
+          400,
+        )
+      }
+      if (!session.conversationId || !session.agentMessageId) {
+        throw new ProxyError(
+          'invalid_request_error',
+          'Tool result received without an active Dust conversation.',
+          400,
+        )
+      }
+      const bridge = session.mcp as SessionMcp | undefined
+      if (!bridge) {
+        throw new ProxyError(
+          'invalid_request_error',
+          'Tool result received without an active tool bridge.',
+          400,
+        )
+      }
+      for (const tr of toolResults) {
+        if (!tr.tool_use_id) continue
+        bridge.resolveToolResult(tr.tool_use_id, tr.content, tr.is_error === true)
+      }
+      await streamTurn(
+        ctx,
+        request,
+        reply,
+        body.model,
+        session.conversationId,
+        session.agentMessageId,
+        session,
+        session.lastEventId,
+      )
+      return
+    }
+
     if (hasUnsupportedBlocks(lastUser.content)) {
       throw new ProxyError(
         'invalid_request_error',
@@ -274,18 +441,22 @@ export function buildMessagesHandler(ctx: ServerContext) {
       content = `[System instructions]\n${extractText(body.system)}\n\n[Claude Code request]\n${userText}`
     }
 
-    const sessionKey = resolveSessionKey(request, body)
-    let session = ctx.sessions.get(sessionKey)
-    if (!session) {
-      session = ctx.sessions.create(sessionKey, apiKey, ctx.dust.workspaceId())
-    }
-    ctx.sessions.touch(session)
-
     const title = userText.slice(0, 80) || 'Claude Code request'
     const stream = body.stream === true
 
     if (stream) {
-      await handleStream(ctx, request, reply, body.model, configurationId, content, title, session)
+      const tools = parseTools(body.tools)
+      await handleStream(
+        ctx,
+        request,
+        reply,
+        body.model,
+        configurationId,
+        content,
+        title,
+        session,
+        tools,
+      )
     } else {
       await handleNonStream(ctx, reply, body.model, configurationId, content, title, session)
     }
