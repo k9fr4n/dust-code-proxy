@@ -34,7 +34,7 @@ const messagesRequestSchema = z
     max_tokens: z.number().int().positive().optional(),
     temperature: z.number().optional(),
     tools: z.array(z.unknown()).optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough()
 

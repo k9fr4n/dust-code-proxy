@@ -37,7 +37,10 @@ export function parseMe(json: unknown): MeInfo {
   const obj = (json ?? {}) as Record<string, any>
   const user = obj.user ?? obj.me ?? obj
   const rawWorkspaces =
-    obj.workspaces ?? obj.memberships ?? (Array.isArray(obj) ? obj : [])
+    user?.workspaces ??
+    obj.workspaces ??
+    obj.memberships ??
+    (Array.isArray(obj) ? obj : [])
   const workspaces = (Array.isArray(rawWorkspaces) ? rawWorkspaces : [])
     .map((w: any) => ({
       sId: w?.sId ?? w?.id ?? w?.workspaceId ?? w?.workspace_sid,
