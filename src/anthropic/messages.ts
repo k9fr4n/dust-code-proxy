@@ -241,7 +241,7 @@ async function streamTurn(
       if (event.kind === 'done') break
       if (event.kind !== 'event') continue
       if (event.eventId) session.lastEventId = event.eventId
-      const frames = translator.translate(event)
+      const frames = translator.translate(event.data)
       for (const frame of frames) reply.raw.write(serializeSse(frame))
       if (translator.isFinished()) break
       if (isTerminalDustEvent(event.type)) break
@@ -319,7 +319,7 @@ async function handleNonStream(
     if (event.kind === 'done') break
     if (event.kind !== 'event') continue
     if (event.eventId) session.lastEventId = event.eventId
-    translator.translate(event)
+    translator.translate(event.data)
     if (isTerminalDustEvent(event.type)) break
   }
   if (!translator.isFinished()) translator.finishExternally()
