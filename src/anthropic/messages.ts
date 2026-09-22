@@ -23,7 +23,11 @@ const contentBlockSchema = z.union([
 ])
 
 const messageSchema = z.object({
-  role: z.enum(['user', 'assistant']),
+  // Claude Code injects `role: "system"` messages (system reminders, git status,
+  // environment context) inside the `messages` array in addition to the top-level
+  // `system` field. Accept them; their text is merged into the forwarded system
+  // context in `handleMessages`.
+  role: z.enum(['user', 'assistant', 'system']),
   content: z.union([z.string(), z.array(contentBlockSchema)]),
 })
 
@@ -471,8 +475,20 @@ export function buildMessagesHandler(ctx: ServerContext) {
     }
 
     let content = userText
-    if (ctx.config.dustForwardSystem && body.system) {
-      content = `[System instructions]\n${extractText(body.system)}\n\n[Claude Code request]\n${userText}`
+    if (ctx.config.dustForwardSystem) {
+      // Merge the top-level `system` field and any inline `system` messages so the
+      // system reminders Claude Code sends as messages are not silently dropped.
+      const systemParts: string[] = []
+      if (body.system) systemParts.push(extractText(body.system))
+      for (const m of body.messages) {
+        if (m.role === 'system') {
+          const text = extractText(m.content)
+          if (text.trim()) systemParts.push(text)
+        }
+      }
+      if (systemParts.length > 0) {
+        content = `[System instructions]\n${systemParts.join('\n\n')}\n\n[Claude Code request]\n${userText}`
+      }
     }
 
     const title = userText.slice(0, 80) || 'Claude Code request'

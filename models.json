@@ -1,2 +1,5 @@
 {
+  "claude-sonnet-5":  { "configurationId": "dLy1V6JMMD" },
+  "claude-opus-5":    { "configurationId": "AcqnwSyy7X" },
+  "claude-4.5-haiku": { "configurationId": "ggKOhTwS8Y" }
 }

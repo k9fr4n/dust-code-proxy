@@ -37,7 +37,11 @@ export class ModelRouter {
       return id
     }
     if (this.defaultAgentConfigurationId) {
-      return this.defaultAgentConfigurationId
+      // Resolve a display name (e.g. "Claude_Sonnet_5") to its real sId, since Dust
+      // silently rejects a mention whose `configurationId` is a name rather than an
+      // sId — which leaves the conversation without any agent message.
+      const agent = this.agentsByName.get(this.defaultAgentConfigurationId.toLowerCase())
+      return agent?.sId ?? this.defaultAgentConfigurationId
     }
     const byName = this.agentsByName.get(model.toLowerCase())
     if (byName) return byName.sId

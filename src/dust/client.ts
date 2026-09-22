@@ -319,7 +319,9 @@ export class DustClient {
     if (!agentId) {
       throw new ProxyError(
         'api_error',
-        'Could not resolve the Dust assistant message id.',
+        'Could not resolve the Dust assistant message id. The agent mention was ' +
+          'probably rejected: check that DUST_DEFAULT_AGENT_CONFIGURATION_ID (or the ' +
+          'models.json entry) is a valid agent sId, not a display name.',
         502,
       )
     }
