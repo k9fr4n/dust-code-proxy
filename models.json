@@ -1,5 +1,32 @@
 {
-  "claude-sonnet-5":  { "configurationId": "dLy1V6JMMD" },
-  "claude-opus-5":    { "configurationId": "AcqnwSyy7X" },
-  "claude-4.5-haiku": { "configurationId": "ggKOhTwS8Y" }
+    "claude-fable-5": {
+        "configurationId": "AcqnwSyy7X"
+    },
+    "claude-opus-5-5": {
+        "configurationId": "AcqnwSyy7X"
+    },
+    "claude-opus-5": {
+        "configurationId": "AcqnwSyy7X"
+    },
+    "opus": {
+        "configurationId": "AcqnwSyy7X"
+    },
+    "claude-sonnet-5": {
+        "configurationId": "dLy1V6JMMD"
+    },
+    "sonnet": {
+        "configurationId": "dLy1V6JMMD"
+    },
+    "claude-4.5-haiku": {
+        "configurationId": "ggKOhTwS8Y"
+    },
+    "claude-haiku": {
+        "configurationId": "ggKOhTwS8Y"
+    },
+    "claude-haiku-4-5-20251001": {
+        "configurationId": "ggKOhTwS8Y"
+    },
+    "haiku": {
+        "configurationId": "ggKOhTwS8Y"
+    }
 }
