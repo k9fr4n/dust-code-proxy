@@ -209,7 +209,7 @@ export class DustClient {
     message: PostMessageInput,
   ): Promise<ConversationResult> {
     const ws = this.workspaceId()
-    const body = {
+    const body: Record<string, unknown> = {
       title,
       visibility: 'unlisted',
       message: {
@@ -217,11 +217,13 @@ export class DustClient {
         mentions: [{ configurationId: message.agentConfigurationId }],
         context: this.messageContext(message.clientSideMCPServerIds),
       },
-      contentFragment: null,
-      contentFragments: null,
       blocking: false,
       skipToolsValidation: false,
-      spaceId: this.config.dustSpaceId ?? null,
+    }
+    // The Dust API rejects `null` for these optional fields (Zod: string/object/array
+    // or undefined, never null). Omit them instead of sending `null`.
+    if (this.config.dustSpaceId) {
+      body.spaceId = this.config.dustSpaceId
     }
     const res = await this.request(
       `/api/v1/w/${ws}/assistant/conversations`,

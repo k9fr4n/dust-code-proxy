@@ -15,7 +15,7 @@ services:
       PROXY_API_KEYS: ${PROXY_API_KEYS:-local-proxy-key}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 3s
       retries: 3
