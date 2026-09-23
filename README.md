@@ -47,9 +47,10 @@ docker compose exec proxy proxyctl login      # [--force] [--workspace <sId>]
 docker compose exec proxy proxyctl logout
 docker compose exec proxy proxyctl status
 docker compose exec proxy proxyctl credits
+docker compose exec proxy proxyctl models      # [--all]
 ```
 
-Ajouter `--json` (`status`, `credits`, `logout`) pour la sortie brute.
+Ajouter `--json` (`status`, `credits`, `logout`, `models`) pour la sortie brute.
 
 Pourquoi `exec` et non `run --rm` : un conteneur jetable écrirait le fichier de
 credentials sans que le serveur en cours ne le relise — le proxy resterait
@@ -65,10 +66,11 @@ réutilisées).
 | `logout` | Purge les credentials (mémoire + fichier) et les sessions. |
 | `status` | Version/uptime/port du proxy, `dust_auth`, workspace, région, utilisateur, TTL du token, nb de modèles et de sessions. |
 | `credits` | Limite, consommation et solde de crédits *fair use* (voir ci-dessous). |
+| `models` | Catalogue des LLM disponibles dans le workspace Dust (voir ci-dessous). |
 
 `status` et `logout` fonctionnent en mode dégradé si le serveur est injoignable
-(lecture / purge du fichier de credentials) ; `login` et `credits` exigent un
-serveur démarré.
+(lecture / purge du fichier de credentials) ; `login`, `credits` et `models`
+exigent un serveur démarré.
 
 ### Jeton d'administration
 
@@ -98,6 +100,32 @@ accepte le même jeton OAuth que l'API publique et ne demande pas de rôle admin
 une date fixe — les crédits reviennent au fur et à mesure que la consommation
 sort de la fenêtre, ce que détaille `refillSchedule` (`nextResetAt` n'est que le
 plus proche de ces réapprovisionnements).
+
+### Modèles du workspace
+
+Même situation que pour les crédits : l'API publique ne liste pas les LLM qu'un
+workspace peut utiliser. `models` interroge l'endpoint de l'application web,
+`GET /api/w/{wId}/models` (non documenté, même jeton OAuth, pas de rôle admin) :
+
+```json
+{ "models": [ { "providerId": "anthropic", "modelId": "claude-opus-5",
+                "displayName": "Claude Opus 5", "contextSize": 250000,
+                "generationTokensCount": 64000, "isSelectable": true } ],
+  "defaultModel": { "providerId": "auto", "modelId": "auto" },
+  "streams": { "auto": { "providerId": "openai", "modelId": "gpt-5.6-luna",
+                         "reasoningEffort": "high" } },
+  "degradedModelIds": [] }
+```
+
+Sortie : une ligne par modèle (fournisseur, identifiant, nom, taille de
+contexte, tokens de sortie, drapeaux `latest`/`legacy`/`hidden`/`degraded`/
+`vision`/`reasoning:…`), puis la résolution courante des paliers `auto`,
+`auto_fast` et `auto_complex` — ce sont des routages Dust, pas de vrais modèles.
+Les modèles marqués non sélectionnables pour le workspace sont masqués sauf avec
+`--all`.
+
+Attention à ne pas confondre ce catalogue **fournisseur** avec `models.json`,
+qui associe les noms de modèles envoyés par Claude Code à des agents Dust.
 
 ## Configuration
 
@@ -153,6 +181,7 @@ Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONF
 | `DELETE /internal/sessions/:id` | Réinitialiser une session (mapping local uniquement). |
 | `GET /internal/status` | État détaillé proxy + Dust (`proxyctl status`). |
 | `GET /internal/credits` | Limite, consommation et solde de crédits (`proxyctl credits`). |
+| `GET /internal/dust-models` | Catalogue des LLM du workspace Dust (`proxyctl models`). |
 | `POST /internal/logout` | Purge des credentials et des sessions (`proxyctl logout`). |
 | `POST /internal/login/start` | Démarre un flux device-code (`{ force }`). |
 | `POST /internal/login/poll` | Sonde le flux (`{ flow }`) → `pending`/`select_workspace`/`authorized`/… |

@@ -6,8 +6,8 @@ import { anthropicErrorBody } from './errors.js'
 import { LoginFlowStore, LoginStep } from './auth/login-flow.js'
 import { LOGIN_HINT } from './dust/client.js'
 
-// Admin endpoints backing the `login`, `logout`, `status` and `credits`
-// commands. They all act on the *running* server instance: credentials are
+// Admin endpoints backing the `login`, `logout`, `status`, `credits` and
+// `models` commands. They all act on the *running* server instance: credentials are
 // swapped in memory and the agent list is refreshed, so no restart is needed
 // after a login or a logout.
 //
@@ -92,6 +92,23 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: ServerContext): v
       window_kind: credits.windowKind ?? null,
       next_reset_at: credits.nextResetAt ?? null,
       refill_schedule: credits.refillSchedule,
+    }
+  })
+
+  // The Dust *provider* catalog (which LLMs the workspace may run), not the
+  // model -> agent mapping served by GET /v1/models.
+  app.get('/internal/dust-models', async (_request, reply) => {
+    if (!ctx.dust.isAuthenticated) await ctx.dust.reload()
+    if (!ctx.dust.isAuthenticated) {
+      return reply.code(401).send(anthropicErrorBody('authentication_error', LOGIN_HINT))
+    }
+    const catalog = await ctx.dust.modelCatalog()
+    return {
+      workspace: ctx.dust.workspaceId(),
+      source: catalog.source,
+      default_model: catalog.defaultModel ?? null,
+      streams: catalog.streams,
+      models: catalog.models,
     }
   })
 
