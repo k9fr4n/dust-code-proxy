@@ -5,7 +5,7 @@ import { DustClient } from './dust/client.js'
 import { ModelRouter } from './models.js'
 import { SessionStore } from './sessions.js'
 import { buildServer } from './server.js'
-import { CommandError, CommandOptions, credits, login, logout, status } from './cli.js'
+import { CommandError, CommandOptions, credits, login, logout, models, status } from './cli.js'
 
 const USAGE = `dust-code-proxy <command>
 
@@ -16,9 +16,13 @@ Commands:
   logout                 Clear the credentials of the running proxy.
   status                 Show proxy + Dust authentication status.
   credits                Show the fair-use credit limit, usage and balance.
+  models [--all]         List the LLMs available in the Dust workspace.
 
 Options:
-  --json                 Print the raw JSON payload (status, credits, logout).
+  --json                 Print the raw JSON payload (status, credits, logout,
+                         models).
+  --all                  models: include the models Dust marks as not
+                         selectable for this workspace.
 
 The admin commands talk to the running container over /internal, so run them with:
   docker compose exec proxy proxyctl <command>
@@ -28,6 +32,7 @@ function parseOptions(argv: string[]): CommandOptions {
   const wsIdx = argv.indexOf('--workspace')
   return {
     force: argv.includes('--force'),
+    all: argv.includes('--all'),
     workspace: wsIdx >= 0 ? argv[wsIdx + 1] : undefined,
     json: argv.includes('--json'),
   }
@@ -65,6 +70,9 @@ async function main(): Promise<void> {
       return
     case 'credits':
       await runCommand(() => credits(config, opts))
+      return
+    case 'models':
+      await runCommand(() => models(config, opts))
       return
     case 'serve':
       break

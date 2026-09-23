@@ -58,6 +58,24 @@ function buildContext(overrides: Partial<FakeDust> = {}): {
       nextResetAt: '2026-09-23T19:23:03.021Z',
       refillSchedule: [{ date: '2026-09-23', credits: 190 }],
     }),
+    modelCatalog: async () => ({
+      source: 'GET /api/w/w-123/models',
+      models: [
+        {
+          providerId: 'anthropic',
+          modelId: 'claude-opus-5',
+          displayName: 'Claude Opus 5',
+          contextSize: 250000,
+          maxOutputTokens: 64000,
+          isSelectable: true,
+          supportsVision: true,
+          reasoningEfforts: ['light', 'medium', 'high'],
+          degraded: false,
+        },
+      ],
+      defaultModel: undefined,
+      streams: [{ stream: 'auto', providerId: 'openai', modelId: 'gpt-5.6-luna' }],
+    }),
   } as unknown as DustClient
 
   const config = loadConfig({
@@ -147,6 +165,36 @@ describe('admin endpoints', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/internal/credits',
+      headers: { 'x-internal-token': INTERNAL_TOKEN },
+    })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('returns the Dust model catalog', async () => {
+    const app = buildServer(buildContext().ctx)
+    const res = await app.inject({
+      method: 'GET',
+      url: '/internal/dust-models',
+      headers: { 'x-internal-token': INTERNAL_TOKEN },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.workspace).toBe('w-123')
+    expect(body.models[0]).toMatchObject({
+      providerId: 'anthropic',
+      modelId: 'claude-opus-5',
+      contextSize: 250000,
+    })
+    expect(body.streams[0].stream).toBe('auto')
+    await app.close()
+  })
+
+  it('refuses the model catalog when not logged in', async () => {
+    const app = buildServer(buildContext({ creds: null }).ctx)
+    const res = await app.inject({
+      method: 'GET',
+      url: '/internal/dust-models',
       headers: { 'x-internal-token': INTERNAL_TOKEN },
     })
     expect(res.statusCode).toBe(401)

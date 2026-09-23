@@ -14,6 +14,7 @@ import {
   findSid,
 } from './parse.js'
 import { CREDITS_PATH, CreditsInfo, parseCredits } from './credits.js'
+import { MODELS_PATH, ModelCatalog, parseModelCatalog } from './catalog.js'
 import { ParsedDustEvent, ParsedMcpRequest, streamSse, streamMcpRequests } from './sse.js'
 import {
   registerMcpResponseSchema,
@@ -251,6 +252,23 @@ export class DustClient {
     }
     const json = await res.json().catch(() => null)
     return parseCredits(json, `GET ${path}`)
+  }
+
+  // Models the workspace can run. See `catalog.ts` for why this uses a web-app
+  // endpoint rather than the public API.
+  async modelCatalog(): Promise<ModelCatalog> {
+    const path = MODELS_PATH.replace('{ws}', this.workspaceId())
+    const res = await this.request(path, {}, this.config.timeouts.createMessageMs)
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new ProxyError(
+        'api_error',
+        `Dust model lookup failed (${res.status}): ${text.slice(0, 200)}`,
+        502,
+      )
+    }
+    const json = await res.json().catch(() => null)
+    return parseModelCatalog(json, `GET ${path}`)
   }
 
   async listAgents(): Promise<DustAgentConfig[]> {

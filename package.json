@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "status": "tsx src/index.ts status",
-    "credits": "tsx src/index.ts credits"
+    "credits": "tsx src/index.ts credits",
+    "models": "tsx src/index.ts models"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

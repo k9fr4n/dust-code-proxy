@@ -15,12 +15,13 @@ import { secondsUntilExpiry } from './auth/jwt.js'
 // credentials in the running process instead.
 //
 // `status` and `logout` degrade gracefully to the local credentials file when
-// the server is not reachable; `login` and `credits` need it.
+// the server is not reachable; `login`, `credits` and `models` need it.
 
 export interface CommandOptions {
   force?: boolean
   workspace?: string
   json?: boolean
+  all?: boolean
 }
 
 class ServerUnreachable extends Error {}
@@ -307,6 +308,89 @@ export async function credits(config: Config, opts: CommandOptions = {}): Promis
     }
     return lines
   })
+}
+
+// --- models -----------------------------------------------------------------
+
+// Lists the LLMs the Dust workspace can run (provider catalog), which is a
+// different thing from models.json, the Claude Code model -> Dust agent map.
+export async function models(config: Config, opts: CommandOptions = {}): Promise<void> {
+  let result: any
+  try {
+    result = await call(config, '/internal/dust-models')
+  } catch (err) {
+    if (err instanceof ServerUnreachable) {
+      throw new CommandError(`${err.message}\n${UNREACHABLE_HINT}`)
+    }
+    throw err
+  }
+
+  print(opts.json ?? false, result, () => {
+    const all: any[] = result.models ?? []
+    // Non-selectable models are still listed by Dust (deprecated, flagged off
+    // for this workspace, …); hide them unless --all.
+    const shown = opts.all ? all : all.filter((m) => m.isSelectable !== false)
+    const lines = [
+      `workspace  : ${result.workspace}`,
+      `default    : ${formatModelRef(result.default_model)}`,
+      `models     : ${shown.length} shown / ${all.length} in the catalog`,
+      '',
+      ...table(
+        ['PROVIDER', 'MODEL ID', 'NAME', 'CONTEXT', 'MAX OUT', 'FLAGS'],
+        shown.map((m) => [
+          m.providerId,
+          m.modelId,
+          m.displayName ?? '',
+          formatTokens(m.contextSize),
+          formatTokens(m.maxOutputTokens),
+          modelFlags(m).join(' '),
+        ]),
+      ),
+    ]
+    if (result.streams?.length) {
+      lines.push('', 'Routing tiers (auto*) currently resolve to:')
+      for (const s of result.streams) {
+        const effort = s.reasoningEffort ? `, reasoning ${s.reasoningEffort}` : ''
+        lines.push(`  ${s.stream.padEnd(13)} ${s.displayName ?? s.modelId} (${s.modelId}${effort})`)
+      }
+    }
+    return lines
+  })
+}
+
+function formatModelRef(model: any): string {
+  if (!model) return 'unknown'
+  return `${model.displayName ?? model.modelId} (${model.providerId}/${model.modelId})`
+}
+
+function modelFlags(model: any): string[] {
+  const flags: string[] = []
+  if (model.isLatest) flags.push('latest')
+  if (model.isLegacy) flags.push('legacy')
+  if (model.isSelectable === false) flags.push('hidden')
+  if (model.degraded) flags.push('degraded')
+  if (model.supportsVision) flags.push('vision')
+  if (model.reasoningEfforts?.length) flags.push(`reasoning:${model.reasoningEfforts.join('/')}`)
+  return flags
+}
+
+function formatTokens(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '-'
+  if (value >= 1000) return `${Math.round(value / 1000)}k`
+  return String(value)
+}
+
+function table(headers: string[], rows: string[][]): string[] {
+  const widths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)),
+  )
+  // Last column is not padded, so a long flag list does not trail spaces.
+  const render = (cells: string[]) =>
+    cells
+      .map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i])))
+      .join('  ')
+      .trimEnd()
+  return [render(headers), ...rows.map(render)]
 }
 
 function formatCredits(value: number | null | undefined): string {
