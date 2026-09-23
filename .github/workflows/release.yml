@@ -71,13 +71,16 @@ jobs:
     steps:
       - name: Compute image name (lowercased)
         id: image
-        run: echo "NAME=${REGISTRY}/$(echo ${GITHUB_REPOSITORY} | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "NAME=${REGISTRY}/$(echo ${GITHUB_REPOSITORY} | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          # docker/metadata-action `type=sha` publishes `sha-<7 chars>`, not the full SHA.
+          echo "TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          scan-ref: ${{ steps.image.outputs.NAME }}:${{ github.sha }}
+          scan-ref: ${{ steps.image.outputs.NAME }}:${{ steps.image.outputs.TAG }}
           format: table
           exit-code: 0
           severity: HIGH,CRITICAL
