@@ -50,6 +50,12 @@ function randomId(prefix: string): string {
   return `${prefix}_${randomBytes(16).toString('hex')}`
 }
 
+// Window in which the MCP bridge collects back-to-back `tools/call` events before
+// ending the turn with `stop_reason: tool_use`. Dust dispatches parallel tools
+// within milliseconds; this lets every `tool_use` block reach Claude Code instead
+// of dropping all but the first.
+const TOOL_USE_FLUSH_DELAY_MS = 200
+
 function extractText(content: string | ContentBlock[]): string {
   if (typeof content === 'string') return content
   return content
@@ -231,15 +237,30 @@ async function streamTurn(
   let toolUseEnded = false
   let interrupted = false
 
+  let toolUseFlushTimer: NodeJS.Timeout | null = null
+  const flushToolUse = () => {
+    if (toolUseFlushTimer) {
+      clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = null
+    }
+    for (const frame of translator.finishToolUse()) {
+      reply.raw.write(serializeSse(frame))
+    }
+    toolUseEnded = true
+    // Stop reading the message events stream: the agent is now waiting on the
+    // tool result(s). Do NOT cancel — the tool-result turn resumes this stream.
+    disconnect.abort()
+  }
+
   bridge?.setEmitter({
     emitToolUse(toolUseId, name, input) {
-      for (const frame of translator.emitToolUse(toolUseId, name, input)) {
+      for (const frame of translator.emitToolUseBlock(toolUseId, name, input)) {
         reply.raw.write(serializeSse(frame))
       }
-      toolUseEnded = true
-      // Stop reading the message events stream: the agent is now waiting on the
-      // tool result. Do NOT cancel — the tool-result turn resumes this stream.
-      disconnect.abort()
+      // Debounce the turn-ending `stop_reason: tool_use` so that all of a batch of
+      // parallel tool calls are emitted before the response closes.
+      if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = setTimeout(flushToolUse, TOOL_USE_FLUSH_DELAY_MS)
     },
   })
 
@@ -294,6 +315,7 @@ async function streamTurn(
       }
     }
   } finally {
+    if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
     bridge?.setEmitter(null)
     socket.off('close', onClose)
     if (interrupted) {
@@ -478,8 +500,13 @@ export function buildMessagesHandler(ctx: ServerContext) {
     if (ctx.config.dustForwardSystem) {
       // Merge the top-level `system` field and any inline `system` messages so the
       // system reminders Claude Code sends as messages are not silently dropped.
+      // The `system` field is the large, static Claude Code prompt, and Claude Code
+      // re-sends it verbatim on every turn — forwarding it each time duplicates the
+      // whole prompt on every Dust user message. Send it only when the conversation
+      // is first created; the per-turn inline `system` messages (git status,
+      // environment, …) are still forwarded below.
       const systemParts: string[] = []
-      if (body.system) systemParts.push(extractText(body.system))
+      if (body.system && !session.conversationId) systemParts.push(extractText(body.system))
       for (const m of body.messages) {
         if (m.role === 'system') {
           const text = extractText(m.content)

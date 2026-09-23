@@ -60,6 +60,7 @@ export class StreamTranslator {
   private blockOpen = false
   private finished = false
   private textBlockEmitted = false
+  private toolUseCount = 0
 
   constructor(
     private readonly messageId: string,
@@ -122,9 +123,13 @@ export class StreamTranslator {
     return [{ type: 'error', error: { type: 'api_error', message } }]
   }
 
-  // Emits a `tool_use` content block and ends the turn with `stop_reason: tool_use`.
-  // Called by the MCP bridge when a Dust `tools/call` is relayed to Claude Code.
-  emitToolUse(toolUseId: string, name: string, input: unknown): AnthropicStreamEvent[] {
+  // Emits a single `tool_use` content block. Dust may dispatch several parallel
+  // tool calls back-to-back, so this does NOT end the turn: the caller emits one
+  // block per `tools/call` and then calls `finishToolUse` once they have all
+  // arrived. Ending the turn here (as before) would drop every tool_use after the
+  // first, leaving Claude Code with a subset of the requested tools and the agent
+  // parked forever waiting for the missing results.
+  emitToolUseBlock(toolUseId: string, name: string, input: unknown): AnthropicStreamEvent[] {
     // A turn already ended (end_turn/error) cannot also emit a tool_use.
     if (this.finished) return []
     const out: AnthropicStreamEvent[] = []
@@ -136,7 +141,8 @@ export class StreamTranslator {
       out.push({ type: 'content_block_stop', index: 0 })
       this.blockOpen = false
     }
-    const index = this.textBlockEmitted ? 1 : 0
+    const index = (this.textBlockEmitted ? 1 : 0) + this.toolUseCount
+    this.toolUseCount += 1
     // Anthropic streams a tool_use block's input through `input_json_delta`
     // partial-JSON events, not through `content_block_start.input` (which is always
     // `{}`). Claude Code rebuilds the input from those deltas (`__json_buf` +
@@ -153,17 +159,23 @@ export class StreamTranslator {
       delta: { type: 'input_json_delta', partial_json: JSON.stringify(input ?? {}) },
     })
     out.push({ type: 'content_block_stop', index })
-    if (!this.finished) {
-      this.stopReason = 'tool_use'
-      out.push({
+    return out
+  }
+
+  // Ends the turn with `stop_reason: tool_use` after every `tool_use` block has
+  // been emitted (see `emitToolUseBlock`).
+  finishToolUse(): AnthropicStreamEvent[] {
+    if (this.finished) return []
+    this.stopReason = 'tool_use'
+    this.finished = true
+    return [
+      {
         type: 'message_delta',
         delta: { stop_reason: 'tool_use', stop_sequence: null },
         usage: { output_tokens: 0 },
-      })
-      out.push({ type: 'message_stop' })
-      this.finished = true
-    }
-    return out
+      },
+      { type: 'message_stop' },
+    ]
   }
 
   private onText(text: string): AnthropicStreamEvent[] {
