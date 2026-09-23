@@ -15,7 +15,9 @@
     "login": "tsx src/index.ts login",
     "logout": "tsx src/index.ts logout",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "status": "tsx src/index.ts status",
+    "credits": "tsx src/index.ts credits"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

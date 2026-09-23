@@ -2,6 +2,8 @@ import Fastify, { FastifyInstance } from 'fastify'
 import { ServerContext } from './context.js'
 import { ProxyError, anthropicErrorBody } from './errors.js'
 import { buildMessagesHandler } from './anthropic/messages.js'
+import { registerAdminRoutes } from './admin.js'
+import { LOGIN_HINT } from './dust/client.js'
 
 export function buildServer(ctx: ServerContext): FastifyInstance {
   const app = Fastify({
@@ -34,9 +36,7 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
     return {
       status: 'ok',
       dust_auth: dustAuth,
-      ...(dustAuth === 'missing'
-        ? { hint: 'run: docker compose run --rm proxy login' }
-        : {}),
+      ...(dustAuth === 'missing' ? { hint: LOGIN_HINT } : {}),
     }
   })
 
@@ -44,7 +44,7 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
     if (!ctx.dust.isAuthenticated) {
       return {
         dust_auth: 'missing',
-        hint: 'run: docker compose run --rm proxy login',
+        hint: LOGIN_HINT,
       }
     }
     const ttl = ctx.dust.tokenTtlSeconds()
@@ -106,6 +106,8 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
     ctx.sessions.delete(id)
     return { ok: true }
   })
+
+  registerAdminRoutes(app, ctx)
 
   return app
 }

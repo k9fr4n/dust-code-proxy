@@ -1,25 +1,95 @@
 import { loadConfig, loadModelMapping } from './config.js'
 import { CredentialStore } from './auth/credentials.js'
+import { ensureInternalToken } from './auth/internal-token.js'
 import { DustClient } from './dust/client.js'
 import { ModelRouter } from './models.js'
 import { SessionStore } from './sessions.js'
 import { buildServer } from './server.js'
-import { login, logout } from './cli.js'
+import { CommandError, CommandOptions, credits, login, logout, status } from './cli.js'
+
+const USAGE = `dust-code-proxy <command>
+
+Commands:
+  serve                  Run the proxy (default).
+  login [--force]        Log in to Dust on the running proxy (device-code flow).
+         [--workspace ID]
+  logout                 Clear the credentials of the running proxy.
+  status                 Show proxy + Dust authentication status.
+  credits                Show credit allowance, consumption and remaining balance.
+
+Options:
+  --json                 Print the raw JSON payload (status, credits, logout).
+
+The admin commands talk to the running container over /internal, so run them with:
+  docker compose exec proxy proxyctl <command>
+`
+
+function parseOptions(argv: string[]): CommandOptions {
+  const wsIdx = argv.indexOf('--workspace')
+  return {
+    force: argv.includes('--force'),
+    workspace: wsIdx >= 0 ? argv[wsIdx + 1] : undefined,
+    json: argv.includes('--json'),
+  }
+}
+
+// Expected command failures print a single line; unexpected ones keep their
+// stack so a real bug stays debuggable.
+async function runCommand(run: () => Promise<void>): Promise<void> {
+  try {
+    await run()
+  } catch (err) {
+    if (err instanceof CommandError) {
+      console.error(err.message)
+      process.exit(1)
+    }
+    throw err
+  }
+}
 
 async function main(): Promise<void> {
   const config = loadConfig()
-  const command = process.argv[2] ?? 'serve'
+  const argv = process.argv.slice(2)
+  const command = argv[0] ?? 'serve'
+  const opts = parseOptions(argv)
 
-  if (command === 'login') {
-    const force = process.argv.includes('--force')
-    const wsIdx = process.argv.indexOf('--workspace')
-    const workspace = wsIdx >= 0 ? process.argv[wsIdx + 1] : undefined
-    await login(config, { force, workspace })
-    return
+  switch (command) {
+    case 'login':
+      await runCommand(() => login(config, opts))
+      return
+    case 'logout':
+      await runCommand(() => logout(config, opts))
+      return
+    case 'status':
+      await runCommand(() => status(config, opts))
+      return
+    case 'credits':
+      await runCommand(() => credits(config, opts))
+      return
+    case 'serve':
+      break
+    case 'help':
+    case '--help':
+    case '-h':
+      console.log(USAGE)
+      return
+    default:
+      console.error(`Unknown command "${command}".\n\n${USAGE}`)
+      process.exit(1)
   }
-  if (command === 'logout') {
-    await logout(config)
-    return
+
+  // The admin endpoints are gated by a shared secret. When INTERNAL_TOKEN is not
+  // configured, generate one in the credentials volume so commands exec'd into
+  // this container can authenticate without any manual setup.
+  if (!config.internalToken) {
+    try {
+      config.internalToken = await ensureInternalToken(config.internalTokenFile)
+    } catch (err) {
+      console.error(
+        `Could not provision the internal admin token (${(err as Error).message}). ` +
+          'The /internal endpoints will stay disabled.',
+      )
+    }
   }
 
   const store = new CredentialStore(config.dustCredentialFile)

@@ -13,7 +13,14 @@ services:
       DUST_DEFAULT_AGENT_CONFIGURATION_ID: ${DUST_DEFAULT_AGENT_CONFIGURATION_ID:-}
       DUST_FORWARD_SYSTEM: ${DUST_FORWARD_SYSTEM:-true}
       PROXY_API_KEYS: ${PROXY_API_KEYS:-local-proxy-key}
+      # Gates /internal/* (used by proxyctl). Left empty, the proxy generates a
+      # random token in the credentials volume at startup, which proxyctl reads
+      # back when exec'd into the container.
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
+      INTERNAL_TOKEN_FILE: /data/internal-token
+      # Monthly credit allocation, used to compute the remaining balance from
+      # consumption (Dust exposes no balance endpoint). Optional.
+      DUST_CREDIT_ALLOWANCE: ${DUST_CREDIT_ALLOWANCE:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DUST_CONNECT_TIMEOUT_MS: ${DUST_CONNECT_TIMEOUT_MS:-}
       DUST_CREATE_MESSAGE_TIMEOUT_MS: ${DUST_CREATE_MESSAGE_TIMEOUT_MS:-}

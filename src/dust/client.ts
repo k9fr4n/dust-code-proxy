@@ -13,12 +13,23 @@ import {
   findAgentMessageId,
   findSid,
 } from './parse.js'
+import {
+  CREDIT_BALANCE_PATHS,
+  CreditsInfo,
+  currentPeriod,
+  hasCreditFigures,
+  parseCredits,
+  sumConsumption,
+} from './credits.js'
 import { ParsedDustEvent, ParsedMcpRequest, streamSse, streamMcpRequests } from './sse.js'
 import {
   registerMcpResponseSchema,
   heartbeatMcpResponseSchema,
   postMcpResultsResponseSchema,
 } from './mcp.js'
+
+export const LOGIN_HINT =
+  'Not logged in to Dust. Run: docker compose exec proxy proxyctl login'
 
 export interface PostMessageInput {
   content: string
@@ -60,6 +71,36 @@ export class DustClient {
     this.creds = await this.store.load()
   }
 
+  // Re-read the credentials file. Used when a sibling process (an older
+  // `docker compose run --rm proxy login`) wrote credentials the running server
+  // has not picked up yet.
+  async reload(): Promise<void> {
+    this.creds = await this.store.load()
+  }
+
+  // Non-secret view of the current credentials, for `status`. Never exposes the
+  // access or refresh token.
+  info(): {
+    workspaceSid: string
+    region: string
+    username?: string
+    fullName?: string
+    email?: string
+    updatedAt: string
+    tokenTtlSeconds: number
+  } | null {
+    if (!this.creds) return null
+    return {
+      workspaceSid: this.creds.workspaceSid,
+      region: this.creds.region,
+      username: this.creds.username,
+      fullName: this.creds.fullName,
+      email: this.creds.email,
+      updatedAt: this.creds.updatedAt,
+      tokenTtlSeconds: this.tokenTtlSeconds(),
+    }
+  }
+
   async setCredentials(creds: Credentials): Promise<void> {
     this.creds = creds
     await this.store.save(creds)
@@ -73,7 +114,7 @@ export class DustClient {
   workspaceId(): string {
     if (!this.creds) {
       throw new DustAuthError(
-        'Not logged in to Dust. Run: docker compose run --rm proxy login',
+        LOGIN_HINT,
       )
     }
     return this.creds.workspaceSid
@@ -93,7 +134,7 @@ export class DustClient {
   private async ensureFreshToken(): Promise<string> {
     if (!this.creds) {
       throw new DustAuthError(
-        'Not logged in to Dust. Run: docker compose run --rm proxy login',
+        LOGIN_HINT,
       )
     }
     if (secondsUntilExpiry(this.creds.accessToken) > 30) {
@@ -102,7 +143,7 @@ export class DustClient {
     await this.refresh()
     if (!this.creds) {
       throw new DustAuthError(
-        'Dust token refresh failed. Run: docker compose run --rm proxy login',
+        `Dust token refresh failed. ${LOGIN_HINT}`,
       )
     }
     return this.creds.accessToken
@@ -186,6 +227,59 @@ export class DustClient {
       throw new ProxyError('api_error', `GET /api/v1/me failed (${res.status})`, 502)
     }
     return parseMe(json)
+  }
+
+  // Remaining credits. See `credits.ts` for why this probes several endpoints
+  // and falls back to the consumption export.
+  async credits(): Promise<CreditsInfo> {
+    const ws = this.workspaceId()
+    for (const template of CREDIT_BALANCE_PATHS) {
+      const path = template.replace('{ws}', ws)
+      let res: Response
+      try {
+        res = await this.request(path, {}, this.config.timeouts.createMessageMs)
+      } catch {
+        continue
+      }
+      if (!res.ok) continue
+      const json = await res.json().catch(() => null)
+      if (json === null) continue
+      const info = parseCredits(json, `GET ${path}`)
+      if (hasCreditFigures(info)) return info
+    }
+    return this.creditsFromConsumption(ws)
+  }
+
+  private async creditsFromConsumption(ws: string): Promise<CreditsInfo> {
+    const period = currentPeriod()
+    const path = `/api/v1/w/${ws}/analytics/consumption/export`
+    const res = await this.request(
+      path,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ...period, format: 'csv' }),
+      },
+      this.config.timeouts.createMessageMs,
+    )
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new ProxyError(
+        'api_error',
+        `Dust exposes no credit balance endpoint, and the consumption export failed (${res.status}): ${text.slice(0, 200)}`,
+        502,
+      )
+    }
+    const used = sumConsumption(await res.text())
+    const allowance = this.config.dustCreditAllowance
+    return {
+      source: `POST ${path}`,
+      allowance,
+      used,
+      remaining:
+        allowance !== undefined && used !== undefined ? allowance - used : undefined,
+      periodStart: period.startDate,
+      periodEnd: period.endDate,
+    }
   }
 
   async listAgents(): Promise<DustAgentConfig[]> {

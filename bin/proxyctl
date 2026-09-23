@@ -1,0 +1,4 @@
+#!/bin/sh
+# Admin entrypoint for `docker compose exec proxy proxyctl <command>`.
+# `docker compose exec` bypasses the image ENTRYPOINT, so this wrapper restores it.
+exec node /app/dist/index.js "$@"

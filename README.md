@@ -15,7 +15,7 @@ ce proxy.
 ```bash
 cp .env.example .env          # puis ajuster PROXY_API_KEYS au minimum
 docker compose up -d --build
-docker compose run --rm proxy login
+docker compose exec proxy proxyctl login
 # → ouvre l'URL affichée dans ton navigateur, saisis le code, sélectionne le workspace
 ```
 
@@ -37,6 +37,62 @@ ANTHROPIC_MODEL="dust-coding-agent" \
 claude -p "Reply with OK only."
 ```
 
+## Commandes d'administration (`proxyctl`)
+
+Les commandes s'exécutent **dans le conteneur déjà en cours d'exécution** via
+`docker compose exec`, et non dans un conteneur jetable :
+
+```bash
+docker compose exec proxy proxyctl login      # [--force] [--workspace <sId>]
+docker compose exec proxy proxyctl logout
+docker compose exec proxy proxyctl status
+docker compose exec proxy proxyctl credits
+```
+
+Ajouter `--json` (`status`, `credits`, `logout`) pour la sortie brute.
+
+Pourquoi `exec` et non `run --rm` : un conteneur jetable écrirait le fichier de
+credentials sans que le serveur en cours ne le relise — le proxy resterait
+non authentifié jusqu'à un redémarrage. Les commandes passent donc par les
+endpoints `/internal/*` du serveur vivant, qui **remplace ses credentials en
+mémoire et rafraîchit la liste des agents à chaud**. `login` invalide aussi les
+sessions en cours (les conversations Dust du workspace précédent ne sont plus
+réutilisées).
+
+| Commande | Sortie |
+|---|---|
+| `login` | Flux device-code piloté par le serveur : URL + code, sélection du workspace, installation à chaud. |
+| `logout` | Purge les credentials (mémoire + fichier) et les sessions. |
+| `status` | Version/uptime/port du proxy, `dust_auth`, workspace, région, utilisateur, TTL du token, nb de modèles et de sessions. |
+| `credits` | Allocation, consommation et solde restant (voir ci-dessous). |
+
+`status` et `logout` fonctionnent en mode dégradé si le serveur est injoignable
+(lecture / purge du fichier de credentials) ; `login` et `credits` exigent un
+serveur démarré.
+
+### Jeton d'administration
+
+Les endpoints `/internal/*` sont protégés par `x-internal-token`. Si
+`INTERNAL_TOKEN` n'est pas défini, le proxy génère un jeton aléatoire au
+démarrage dans `INTERNAL_TOKEN_FILE` (`/data/internal-token`, volume
+`dust-credentials`, permissions `0600`) ; `proxyctl` le relit depuis le même
+conteneur. Aucun secret par défaut n'est donc exposé sur le port publié.
+
+### Crédits restants
+
+L'API publique Dust documente la *consommation*
+(`POST /api/v1/w/{wId}/analytics/consumption/export`) mais aucun endpoint de
+solde. `credits` procède donc en deux temps :
+
+1. sondage de quelques endpoints de solde candidats (non documentés, utilisés par
+   l'application web ; ignorés s'ils répondent 404/403) ;
+2. repli sur l'export de consommation du mois calendaire en cours pour obtenir
+   les crédits **consommés**, et déduction du restant si l'allocation est connue
+   via `DUST_CREDIT_ALLOWANCE` (500 free / 8 000 pro / 40 000 max par siège).
+
+Les champs inconnus sont affichés `unknown` plutôt que `0`. L'export de
+consommation requiert un rôle admin sur le workspace.
+
 ## Configuration
 
 ### Variables d'environnement
@@ -53,7 +109,10 @@ claude -p "Reply with OK only."
 | `DUST_MCP_SERVER_NAME` | `claude-code-proxy` | Nom du serveur MCP enregistré auprès de Dust (5–30 caractères). |
 | `DUST_MCP_HEARTBEAT_INTERVAL_MS` | `240000` | Période du heartbeat MCP (Dust impose ≤ 5 min ; marge de sécurité). |
 | `DUST_MCP_RECONNECT_DELAY_MS` | `5000` | Délai de reconnexion du flux SSE `mcp/requests`. |
-| `INTERNAL_TOKEN` | *(vide)* | Active les endpoints `/internal/*` si défini. |
+| `DUST_CREDIT_ALLOWANCE` | *(vide)* | Allocation mensuelle de crédits, pour calculer le solde restant. |
+| `INTERNAL_TOKEN` | *(vide)* | Jeton des endpoints `/internal/*`. Vide → généré dans `INTERNAL_TOKEN_FILE`. |
+| `INTERNAL_TOKEN_FILE` | `<dir de DUST_CREDENTIAL_FILE>/internal-token` | Emplacement du jeton généré. |
+| `PROXY_ADMIN_URL` | `http://127.0.0.1:<PORT>` | URL utilisée par `proxyctl` pour joindre le serveur. |
 | `PORT` | `8080` | Port d'écoute. |
 
 ### Mapping modèle → agent Dust
@@ -87,6 +146,14 @@ Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONF
 | `GET /v1/models` | Liste de confort (mapping + agents découverts). |
 | `POST /internal/sessions` | Créer/consulter une session (clé `session`). |
 | `DELETE /internal/sessions/:id` | Réinitialiser une session (mapping local uniquement). |
+| `GET /internal/status` | État détaillé proxy + Dust (`proxyctl status`). |
+| `GET /internal/credits` | Crédits alloués / consommés / restants (`proxyctl credits`). |
+| `POST /internal/logout` | Purge des credentials et des sessions (`proxyctl logout`). |
+| `POST /internal/login/start` | Démarre un flux device-code (`{ force }`). |
+| `POST /internal/login/poll` | Sonde le flux (`{ flow }`) → `pending`/`select_workspace`/`authorized`/… |
+| `POST /internal/login/workspace` | Finalise avec le workspace choisi (`{ flow, workspace }`). |
+
+Les endpoints `/internal/*` ne renvoient jamais les tokens OAuth.
 
 ## Identification de session
 
