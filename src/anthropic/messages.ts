@@ -111,6 +111,14 @@ function extractToolResults(content: string | ContentBlock[]): ToolResultBlock[]
   return results
 }
 
+// Summarize the block types of a message's content for diagnostics (a plain-string
+// content is a single `text` block). Used to tell a `tool_result` continuation apart
+// from a replayed history in logs, without dumping the content itself.
+function contentBlockTypes(content: string | ContentBlock[]): (string | undefined)[] {
+  if (typeof content === 'string') return ['text']
+  return content.map((block) => block.type)
+}
+
 // Coerce the free-form `tools[]` into the narrow shape the bridge needs. Anything
 // that lacks a `name` is dropped; malformed `input_schema` falls back to `undefined`
 // and the bridge's `jsonSchemaToZod` maps it to a loose record.
@@ -510,6 +518,28 @@ export function buildMessagesHandler(ctx: ServerContext) {
       // Tool-result turn: resolve the parked calls and resume the parked Dust
       // generation from where the previous turn ended — no new user message.
       if (body.stream !== true) {
+        // Diagnostic for "Tool-result continuation requires streaming": log what
+        // actually arrived so a resume/retry (non-streaming replay) can be told
+        // apart from a missing or forged `stream` flag.
+        request.log.warn(
+          {
+            stream: body.stream,
+            model: body.model,
+            toolResultCount: toolResults.length,
+            toolUseIds: toolResults
+              .map((t) => t.tool_use_id)
+              .filter((id): id is string => typeof id === 'string'),
+            lastUserBlockTypes: contentBlockTypes(lastUser.content),
+            messages: body.messages.map((m) => ({ role: m.role, types: contentBlockTypes(m.content) })),
+            session: {
+              hasConversationId: Boolean(session.conversationId),
+              hasAgentMessageId: Boolean(session.agentMessageId),
+              hasBridge: Boolean(session.mcp),
+              lastEventId: session.lastEventId,
+            },
+          },
+          'tool_result continuation received without stream=true',
+        )
         throw new ProxyError(
           'invalid_request_error',
           'Tool-result continuation requires streaming.',
