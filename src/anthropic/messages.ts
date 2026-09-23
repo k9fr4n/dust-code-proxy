@@ -50,12 +50,36 @@ function randomId(prefix: string): string {
   return `${prefix}_${randomBytes(16).toString('hex')}`
 }
 
+// Window in which the MCP bridge collects back-to-back `tools/call` events before
+// ending the turn with `stop_reason: tool_use`. Dust dispatches parallel tools
+// within milliseconds; this lets every `tool_use` block reach Claude Code instead
+// of dropping all but the first.
+const TOOL_USE_FLUSH_DELAY_MS = 200
+
 function extractText(content: string | ContentBlock[]): string {
   if (typeof content === 'string') return content
   return content
     .map((block) => (block.type === 'text' && typeof block.text === 'string' ? block.text : ''))
     .filter(Boolean)
     .join('\n\n')
+}
+
+// Claude Code sends a hidden "name this session" request before the first real
+// turn. It carries a distinctive system prompt; detect it so it can be answered
+// locally instead of creating a Dust conversation and burning an agent turn.
+function isNamingRequest(body: MessagesRequest): boolean {
+  if (!body.system) return false
+  return extractText(body.system).includes('naming a coding session')
+}
+
+// Derive a session title from the naming request's content, which wraps the
+// conversation so far in a `<session>…</session>` block. The exact wording is not
+// critical — it is only a label in the session list.
+function sessionTitleFrom(content: string): string {
+  const match = content.match(/<session>([\s\S]*?)<\/session>/)
+  const source = match ? match[1] : content
+  const cleaned = source.replace(/\s+/g, ' ').trim()
+  return cleaned.slice(0, 80) || 'Claude Code session'
 }
 
 function hasUnsupportedBlocks(content: string | ContentBlock[]): boolean {
@@ -231,15 +255,30 @@ async function streamTurn(
   let toolUseEnded = false
   let interrupted = false
 
+  let toolUseFlushTimer: NodeJS.Timeout | null = null
+  const flushToolUse = () => {
+    if (toolUseFlushTimer) {
+      clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = null
+    }
+    for (const frame of translator.finishToolUse()) {
+      reply.raw.write(serializeSse(frame))
+    }
+    toolUseEnded = true
+    // Stop reading the message events stream: the agent is now waiting on the
+    // tool result(s). Do NOT cancel — the tool-result turn resumes this stream.
+    disconnect.abort()
+  }
+
   bridge?.setEmitter({
     emitToolUse(toolUseId, name, input) {
-      for (const frame of translator.emitToolUse(toolUseId, name, input)) {
+      for (const frame of translator.emitToolUseBlock(toolUseId, name, input)) {
         reply.raw.write(serializeSse(frame))
       }
-      toolUseEnded = true
-      // Stop reading the message events stream: the agent is now waiting on the
-      // tool result. Do NOT cancel — the tool-result turn resumes this stream.
-      disconnect.abort()
+      // Debounce the turn-ending `stop_reason: tool_use` so that all of a batch of
+      // parallel tool calls are emitted before the response closes.
+      if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = setTimeout(flushToolUse, TOOL_USE_FLUSH_DELAY_MS)
     },
   })
 
@@ -294,6 +333,7 @@ async function streamTurn(
       }
     }
   } finally {
+    if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
     bridge?.setEmitter(null)
     socket.off('close', onClose)
     if (interrupted) {
@@ -369,6 +409,47 @@ async function handleNonStream(
   })
 }
 
+// Answer Claude Code's hidden "name this session" request without a Dust round-trip.
+// The title is the only thing it needs, so stream (or return) a single JSON title
+// as a normal assistant message.
+async function replySessionTitle(
+  reply: FastifyReply,
+  model: string,
+  title: string,
+  stream: boolean,
+): Promise<void> {
+  const messageId = randomId('msg')
+  const text = JSON.stringify({ title })
+  if (!stream) {
+    reply.send({
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [{ type: 'text', text }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    })
+    return
+  }
+  reply.hijack()
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  const translator = new StreamTranslator(messageId, model)
+  for (const frame of translator.translate({
+    type: 'agent_message_success',
+    message: { content: text },
+  })) {
+    reply.raw.write(serializeSse(frame))
+  }
+  reply.raw.end()
+}
+
 export function buildMessagesHandler(ctx: ServerContext) {
   return async function messagesHandler(
     request: FastifyRequest,
@@ -396,12 +477,25 @@ export function buildMessagesHandler(ctx: ServerContext) {
     }
     const body = parsed.data
 
-    const configurationId = ctx.router.resolve(body.model)
-
     const lastUser = [...body.messages].reverse().find((m) => m.role === 'user')
     if (!lastUser) {
       throw new ProxyError('invalid_request_error', 'No user message found in the request.', 400)
     }
+
+    // Claude Code's hidden "name this session" request is not a real user turn:
+    // answer it locally so it neither creates a Dust conversation nor consumes an
+    // agent turn (previously it opened the conversation and generated the title).
+    if (isNamingRequest(body)) {
+      await replySessionTitle(
+        reply,
+        body.model,
+        sessionTitleFrom(extractText(lastUser.content)),
+        body.stream === true,
+      )
+      return
+    }
+
+    const configurationId = ctx.router.resolve(body.model)
 
     const sessionKey = resolveSessionKey(request, body)
     let session = ctx.sessions.get(sessionKey)
@@ -478,8 +572,13 @@ export function buildMessagesHandler(ctx: ServerContext) {
     if (ctx.config.dustForwardSystem) {
       // Merge the top-level `system` field and any inline `system` messages so the
       // system reminders Claude Code sends as messages are not silently dropped.
+      // The `system` field is the large, static Claude Code prompt, and Claude Code
+      // re-sends it verbatim on every turn — forwarding it each time duplicates the
+      // whole prompt on every Dust user message. Send it only when the conversation
+      // is first created; the per-turn inline `system` messages (git status,
+      // environment, …) are still forwarded below.
       const systemParts: string[] = []
-      if (body.system) systemParts.push(extractText(body.system))
+      if (body.system && !session.conversationId) systemParts.push(extractText(body.system))
       for (const m of body.messages) {
         if (m.role === 'system') {
           const text = extractText(m.content)
