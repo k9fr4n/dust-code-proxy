@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
+import { LOGIN_HINT } from '../dust/client.js'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
 import { Session } from '../sessions.js'
@@ -470,7 +471,7 @@ export function buildMessagesHandler(ctx: ServerContext) {
     if (!ctx.dust.isAuthenticated) {
       throw new ProxyError(
         'authentication_error',
-        'Not logged in to Dust. Run: docker compose run --rm proxy login',
+        LOGIN_HINT,
         401,
       )
     }
