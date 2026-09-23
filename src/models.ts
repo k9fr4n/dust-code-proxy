@@ -58,6 +58,14 @@ export class ModelRouter {
     return [...ids]
   }
 
+  // Claude Code model names that route to a given Dust agent. Used by
+  // `proxyctl agents` to show the mapping next to each agent.
+  modelsForAgent(sId: string): string[] {
+    return Object.entries(this.mapping)
+      .filter(([, mapped]) => mapped?.configurationId === sId)
+      .map(([model]) => model)
+  }
+
   missingMappedIds(): string[] {
     const missing: string[] = []
     for (const [model, mapped] of Object.entries(this.mapping)) {

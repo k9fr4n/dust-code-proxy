@@ -112,6 +112,33 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: ServerContext): v
     }
   })
 
+  // The workspace agents (the routing targets of models.json), with the scope,
+  // status and LLM of each. Uses the web-app manage view; see `dust/agents.ts`.
+  app.get('/internal/agents', async (_request, reply) => {
+    if (!ctx.dust.isAuthenticated) await ctx.dust.reload()
+    if (!ctx.dust.isAuthenticated) {
+      return reply.code(401).send(anthropicErrorBody('authentication_error', LOGIN_HINT))
+    }
+    const list = await ctx.dust.agentList()
+    const fallback = ctx.config.dustDefaultAgentConfigurationId
+    return {
+      workspace: ctx.dust.workspaceId(),
+      source: list.source,
+      default_agent: fallback ?? null,
+      agents: list.agents.map((agent) => ({
+        ...agent,
+        // Claude Code model names routed here, and whether this agent is the
+        // fallback. DUST_DEFAULT_AGENT_CONFIGURATION_ID accepts a name as well
+        // as an sId, so match on both.
+        models: ctx.router.modelsForAgent(agent.sId),
+        isDefault:
+          fallback !== undefined &&
+          (fallback === agent.sId ||
+            fallback.toLowerCase() === agent.name.toLowerCase()),
+      })),
+    }
+  })
+
   app.post('/internal/logout', async () => {
     const info = ctx.dust.info()
     await ctx.dust.clearCredentials()

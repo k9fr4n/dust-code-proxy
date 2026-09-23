@@ -15,7 +15,7 @@ import { secondsUntilExpiry } from './auth/jwt.js'
 // credentials in the running process instead.
 //
 // `status` and `logout` degrade gracefully to the local credentials file when
-// the server is not reachable; `login`, `credits` and `models` need it.
+// the server is not reachable; `login`, `credits`, `models` and `agents` need it.
 
 export interface CommandOptions {
   force?: boolean
@@ -356,6 +356,63 @@ export async function models(config: Config, opts: CommandOptions = {}): Promise
     }
     return lines
   })
+}
+
+// --- agents -----------------------------------------------------------------
+
+// Lists the Dust agents of the workspace: these are the routing *targets* of
+// models.json, not the LLMs listed by `models`.
+export async function agents(config: Config, opts: CommandOptions = {}): Promise<void> {
+  let result: any
+  try {
+    result = await call(config, '/internal/agents')
+  } catch (err) {
+    if (err instanceof ServerUnreachable) {
+      throw new CommandError(`${err.message}\n${UNREACHABLE_HINT}`)
+    }
+    throw err
+  }
+
+  print(opts.json ?? false, result, () => {
+    const all: any[] = result.agents ?? []
+    // Dust keeps archived agents in the manage view; hide them unless --all.
+    const shown = (opts.all ? all : all.filter((a) => a.status !== 'archived'))
+      .slice()
+      // Mapped agents first: those are the ones Claude Code actually reaches.
+      .sort(
+        (a, b) =>
+          (b.models?.length ? 1 : 0) - (a.models?.length ? 1 : 0) ||
+          a.name.localeCompare(b.name),
+      )
+    return [
+      `workspace  : ${result.workspace}`,
+      `default    : ${result.default_agent ?? 'none (models.json only)'}`,
+      `agents     : ${shown.length} shown / ${all.length} in the workspace`,
+      '',
+      ...table(
+        ['SID', 'NAME', 'SCOPE', 'MODEL', 'MAPPED MODELS', 'FLAGS'],
+        shown.map((a) => [
+          a.sId,
+          a.name,
+          a.scope ?? '-',
+          a.modelId ? `${a.providerId ?? '?'}/${a.modelId}` : '-',
+          (a.models ?? []).join(' ') || '-',
+          agentFlags(a).join(' '),
+        ]),
+      ),
+    ]
+  })
+}
+
+function agentFlags(agent: any): string[] {
+  const flags: string[] = []
+  if (agent.isDefault) flags.push('default')
+  if (agent.status && agent.status !== 'active') flags.push(agent.status)
+  if (agent.userFavorite) flags.push('favorite')
+  if (agent.canEdit) flags.push('editable')
+  if (agent.reasoningEffort) flags.push(`reasoning:${agent.reasoningEffort}`)
+  if (agent.actionCount) flags.push(`tools:${agent.actionCount}`)
+  return flags
 }
 
 function formatModelRef(model: any): string {

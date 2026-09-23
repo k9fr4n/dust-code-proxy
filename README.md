@@ -48,9 +48,11 @@ docker compose exec proxy proxyctl logout
 docker compose exec proxy proxyctl status
 docker compose exec proxy proxyctl credits
 docker compose exec proxy proxyctl models      # [--all]
+docker compose exec proxy proxyctl agents      # [--all]
 ```
 
-Ajouter `--json` (`status`, `credits`, `logout`, `models`) pour la sortie brute.
+Ajouter `--json` (`status`, `credits`, `logout`, `models`, `agents`) pour la
+sortie brute.
 
 Pourquoi `exec` et non `run --rm` : un conteneur jetable écrirait le fichier de
 credentials sans que le serveur en cours ne le relise — le proxy resterait
@@ -67,10 +69,11 @@ réutilisées).
 | `status` | Version/uptime/port du proxy, `dust_auth`, workspace, région, utilisateur, TTL du token, nb de modèles et de sessions. |
 | `credits` | Limite, consommation et solde de crédits *fair use* (voir ci-dessous). |
 | `models` | Catalogue des LLM disponibles dans le workspace Dust (voir ci-dessous). |
+| `agents` | Agents Dust du workspace, avec leur `sId` et le mapping `models.json` (voir ci-dessous). |
 
 `status` et `logout` fonctionnent en mode dégradé si le serveur est injoignable
-(lecture / purge du fichier de credentials) ; `login`, `credits` et `models`
-exigent un serveur démarré.
+(lecture / purge du fichier de credentials) ; `login`, `credits`, `models` et
+`agents` exigent un serveur démarré.
 
 ### Jeton d'administration
 
@@ -127,6 +130,37 @@ Les modèles marqués non sélectionnables pour le workspace sont masqués sauf 
 Attention à ne pas confondre ce catalogue **fournisseur** avec `models.json`,
 qui associe les noms de modèles envoyés par Claude Code à des agents Dust.
 
+### Agents du workspace
+
+`agents` liste les agents Dust — les **cibles** de `models.json`, à ne pas
+confondre avec les LLM de `models`. L'API publique
+(`GET /api/v1/w/{wId}/assistant/agent_configurations`, celle qu'utilise le proxy
+pour le routage) ne renvoie guère plus qu'un nom et un `sId` ; la commande
+interroge donc la vue *manage* de l'application web,
+`GET /api/w/{wId}/assistant/agent_configurations?view=manage` (non documenté,
+même jeton OAuth, pas de rôle admin) :
+
+```json
+{ "agentConfigurations": [
+    { "sId": "ggKOhTwS8Y", "name": "Claude_4.5_Haiku", "scope": "hidden",
+      "status": "active", "userFavorite": false, "canEdit": true,
+      "model": { "providerId": "anthropic", "modelId": "claude-haiku-4-5-20251001",
+                 "temperature": 0.7, "reasoningEffort": "light" },
+      "actions": [], "tags": [] } ] }
+```
+
+Sortie : une ligne par agent (`sId`, nom, portée, LLM exécuté, noms de modèles
+Claude Code qui y sont routés, drapeaux `default`/`favorite`/`editable`/
+`reasoning:…`/`tools:N`). Les agents mappés dans `models.json` sont listés en
+premier. Les agents archivés sont masqués sauf avec `--all`.
+
+`scope` vaut `global` pour les agents fournis par Dust (`@help`, `@dust`, …),
+`visible` pour ceux publiés dans le workspace et `hidden` pour les agents
+personnels non publiés — ces derniers restent des cibles de routage parfaitement
+valides : les agents `Claude_*` mappés par ce proxy sont justement de ce type.
+C'est la commande à utiliser pour récupérer les `sId` à coller dans
+`models.json`.
+
 ## Configuration
 
 ### Variables d'environnement
@@ -162,8 +196,8 @@ qui associe les noms de modèles envoyés par Claude Code à des agents Dust.
 }
 ```
 
-Les `configurationId` sont les `sId` réels de tes agents Dust (visibles via
-`GET assistant/agent_configurations`). Au démarrage (et sur `GET /v1/models`), le
+Les `configurationId` sont les `sId` réels de tes agents Dust (listés par
+`proxyctl agents`). Au démarrage (et sur `GET /v1/models`), le
 proxy rafraîchit cette liste et log un avertissement si un id mappé n'existe pas.
 
 Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONFIGURATION_ID`
@@ -182,6 +216,7 @@ Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONF
 | `GET /internal/status` | État détaillé proxy + Dust (`proxyctl status`). |
 | `GET /internal/credits` | Limite, consommation et solde de crédits (`proxyctl credits`). |
 | `GET /internal/dust-models` | Catalogue des LLM du workspace Dust (`proxyctl models`). |
+| `GET /internal/agents` | Agents Dust du workspace + mapping `models.json` (`proxyctl agents`). |
 | `POST /internal/logout` | Purge des credentials et des sessions (`proxyctl logout`). |
 | `POST /internal/login/start` | Démarre un flux device-code (`{ force }`). |
 | `POST /internal/login/poll` | Sonde le flux (`{ flow }`) → `pending`/`select_workspace`/`authorized`/… |
