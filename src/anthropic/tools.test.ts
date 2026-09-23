@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { jsonSchemaToZod, toolResultToText } from './tools.js'
+import { jsonSchemaToZod, toolResultToText, coerceToolInput } from './tools.js'
 
 describe('jsonSchemaToZod', () => {
   it('maps an object schema with properties and required', () => {
@@ -91,5 +91,43 @@ describe('toolResultToText', () => {
   it('stringifies primitives and null', () => {
     expect(toolResultToText(null)).toBe('""')
     expect(toolResultToText(42)).toBe('42')
+  })
+})
+
+describe('coerceToolInput', () => {
+  const bashSchema = {
+    type: 'object',
+    properties: {
+      command: { type: 'string' },
+      timeout: { type: 'number' },
+      run_in_background: { type: 'boolean' },
+    },
+  }
+
+  it('leaves well-typed input untouched', () => {
+    expect(coerceToolInput({ command: 'ls' }, bashSchema)).toEqual({ command: 'ls' })
+  })
+
+  it('coerces a non-string command into a string', () => {
+    expect(coerceToolInput({ command: 42 }, bashSchema)).toEqual({ command: '42' })
+    expect(coerceToolInput({ command: { cmd: 'ls' } }, bashSchema)).toEqual({
+      command: '{"cmd":"ls"}',
+    })
+    expect(coerceToolInput({ command: ['ls', '-la'] }, bashSchema)).toEqual({
+      command: '["ls","-la"]',
+    })
+  })
+
+  it('leaves non-string fields and unknown keys alone', () => {
+    expect(coerceToolInput({ command: 'ls', timeout: 5, extra: { a: 1 } }, bashSchema)).toEqual({
+      command: 'ls',
+      timeout: 5,
+      extra: { a: 1 },
+    })
+  })
+
+  it('passes through when there is no string-typed schema', () => {
+    expect(coerceToolInput({ command: 42 }, { type: 'object' })).toEqual({ command: 42 })
+    expect(coerceToolInput({ command: 42 }, undefined)).toEqual({ command: 42 })
   })
 })

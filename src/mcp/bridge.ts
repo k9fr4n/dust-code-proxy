@@ -6,6 +6,7 @@ import { Config } from '../config.js'
 import { DustMcpTransport, McpEndpoint } from '../dust/mcp.js'
 import {
   AnthropicTool,
+  coerceToolInput,
   jsonSchemaToZod,
   toolResultToText,
 } from '../anthropic/tools.js'
@@ -158,13 +159,24 @@ export class SessionMcp {
     input: Record<string, unknown>,
   ): Promise<CallToolResult> {
     const toolUseId = `toolu_${randomBytes(16).toString('hex')}`
+    // Normalize the model's arguments against the declared schema before emitting
+    // the `tool_use`: a non-string `command` (object/number/array) otherwise reaches
+    // Claude Code, whose local validation rejects it as "command expected string".
+    const schema = this.tools.find((t) => t.name === name)?.input_schema
+    const sanitized = coerceToolInput(input, schema)
+    if (JSON.stringify(sanitized) !== JSON.stringify(input)) {
+      this.logger?.warn?.(
+        { name, before: input, after: sanitized },
+        'coerced tool input to match schema string fields',
+      )
+    }
     const result = new Promise<ToolCallResult>((resolve, reject) => {
-      this.pending.set(toolUseId, { toolUseId, name, input, resolve, reject })
+      this.pending.set(toolUseId, { toolUseId, name, input: sanitized, resolve, reject })
     })
     // Emit the tool_use block on the active streaming reply. Claude Code runs the
     // tool locally and returns a tool_result in its next request, which
     // `resolveToolResult` uses to settle this promise.
-    this.activeEmitter?.emitToolUse(toolUseId, name, input)
+    this.activeEmitter?.emitToolUse(toolUseId, name, sanitized)
     const res = await result
     return {
       content: [{ type: 'text', text: res.text }],
