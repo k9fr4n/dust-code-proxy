@@ -76,6 +76,33 @@ function buildContext(overrides: Partial<FakeDust> = {}): {
       defaultModel: undefined,
       streams: [{ stream: 'auto', providerId: 'openai', modelId: 'gpt-5.6-luna' }],
     }),
+    agentList: async () => ({
+      source: 'GET /api/w/w-123/assistant/agent_configurations?view=manage',
+      agents: [
+        {
+          sId: 'agent-1',
+          name: 'Dev',
+          scope: 'hidden',
+          status: 'active',
+          userFavorite: false,
+          canEdit: true,
+          providerId: 'anthropic',
+          modelId: 'claude-opus-5',
+          actionCount: 0,
+          tags: [],
+        },
+        {
+          sId: 'agent-2',
+          name: 'help',
+          scope: 'global',
+          status: 'active',
+          userFavorite: false,
+          canEdit: false,
+          actionCount: 0,
+          tags: [],
+        },
+      ],
+    }),
   } as unknown as DustClient
 
   const config = loadConfig({
@@ -86,7 +113,12 @@ function buildContext(overrides: Partial<FakeDust> = {}): {
   } as NodeJS.ProcessEnv)
 
   return {
-    ctx: { config, dust, router: new ModelRouter({}), sessions: new SessionStore() },
+    ctx: {
+      config: { ...config, dustDefaultAgentConfigurationId: 'Dev' },
+      dust,
+      router: new ModelRouter({ opus: { configurationId: 'agent-1' } }),
+      sessions: new SessionStore(),
+    },
     fake,
   }
 }
@@ -195,6 +227,41 @@ describe('admin endpoints', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/internal/dust-models',
+      headers: { 'x-internal-token': INTERNAL_TOKEN },
+    })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('lists the workspace agents with their mapped models', async () => {
+    const app = buildServer(buildContext().ctx)
+    const res = await app.inject({
+      method: 'GET',
+      url: '/internal/agents',
+      headers: { 'x-internal-token': INTERNAL_TOKEN },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.workspace).toBe('w-123')
+    expect(body.default_agent).toBe('Dev')
+    expect(body.agents[0]).toMatchObject({
+      sId: 'agent-1',
+      name: 'Dev',
+      scope: 'hidden',
+      modelId: 'claude-opus-5',
+      models: ['opus'],
+      // Matched by name: DUST_DEFAULT_AGENT_CONFIGURATION_ID is not an sId here.
+      isDefault: true,
+    })
+    expect(body.agents[1]).toMatchObject({ sId: 'agent-2', models: [], isDefault: false })
+    await app.close()
+  })
+
+  it('refuses the agent list when not logged in', async () => {
+    const app = buildServer(buildContext({ creds: null }).ctx)
+    const res = await app.inject({
+      method: 'GET',
+      url: '/internal/agents',
       headers: { 'x-internal-token': INTERNAL_TOKEN },
     })
     expect(res.statusCode).toBe(401)

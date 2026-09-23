@@ -15,6 +15,7 @@ import {
 } from './parse.js'
 import { CREDITS_PATH, CreditsInfo, parseCredits } from './credits.js'
 import { MODELS_PATH, ModelCatalog, parseModelCatalog } from './catalog.js'
+import { AGENTS_PATH, AgentList, parseAgentList } from './agents.js'
 import { ParsedDustEvent, ParsedMcpRequest, streamSse, streamMcpRequests } from './sse.js'
 import {
   registerMcpResponseSchema,
@@ -269,6 +270,23 @@ export class DustClient {
     }
     const json = await res.json().catch(() => null)
     return parseModelCatalog(json, `GET ${path}`)
+  }
+
+  // Full agent list (scope, status, model, …). See `agents.ts` for why this uses
+  // a web-app endpoint rather than the public API.
+  async agentList(): Promise<AgentList> {
+    const path = AGENTS_PATH.replace('{ws}', this.workspaceId())
+    const res = await this.request(path, {}, this.config.timeouts.createMessageMs)
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new ProxyError(
+        'api_error',
+        `Dust agent lookup failed (${res.status}): ${text.slice(0, 200)}`,
+        502,
+      )
+    }
+    const json = await res.json().catch(() => null)
+    return parseAgentList(json, `GET ${path}`)
   }
 
   async listAgents(): Promise<DustAgentConfig[]> {
