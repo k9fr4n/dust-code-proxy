@@ -93,3 +93,35 @@ export function toolResultToText(content: unknown): string {
   }
   return JSON.stringify(content ?? '')
 }
+
+// The Dust model can emit a tool argument whose value does not match the declared
+// type — most often `command` for the Bash tool arrives as a number, an object or a
+// nested array instead of a string. Claude Code re-validates the `tool_use` block
+// locally and rejects a mismatched type ("command expected string, provided
+// unknown"). Coerce every field the schema declares as `type: "string"` into a real
+// string before the block is emitted; unknown or non-string fields pass through
+// untouched.
+export function coerceToolInput(
+  input: unknown,
+  inputSchema?: Record<string, unknown>,
+): Record<string, unknown> {
+  const obj =
+    input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {}
+  const properties = inputSchema?.properties
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+    return obj
+  }
+  const out: Record<string, unknown> = { ...obj }
+  for (const [key, sub] of Object.entries(properties as Record<string, unknown>)) {
+    const fieldSchema = (sub ?? {}) as Record<string, unknown>
+    if (fieldSchema.type !== 'string') continue
+    const value = out[key]
+    if (value === undefined || value === null) continue
+    if (typeof value !== 'string') {
+      out[key] = typeof value === 'object' ? JSON.stringify(value) : String(value)
+    }
+  }
+  return out
+}
