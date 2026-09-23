@@ -2,9 +2,10 @@ import { DustStreamEvent } from '../dust/sse.js'
 
 // Translation of Dust message-stream events into Anthropic SSE events consumed by
 // Claude Code. The MVP is text-only: tool_* events are deliberately ignored (the
-// MCP tool bridge is phase 2 / step 5). `generation_tokens.classification` is
-// logged by the caller but currently mapped as plain text; mapping it to Anthropic
-// `thinking` blocks is a TODO once the exact values are observed in production.
+// MCP tool bridge is phase 2 / step 5). `generation_tokens.classification` is used
+// to separate the reasoning trace (`chain_of_thought` + delimiter markers) from the
+// assistant's answer (`tokens`); only the answer is emitted. Mapping the trace to
+// Anthropic `thinking` blocks remains a TODO.
 
 export type AnthropicStreamEvent =
   | { type: 'message_start'; message: Record<string, unknown> }
@@ -27,6 +28,28 @@ export function isTerminalDustEvent(type: string): boolean {
   return TERMINAL_EVENT_TYPES.has(type)
 }
 
+// Dust models a message body as either a plain string or a nested tree of content
+// nodes (`{ text }`, `{ content }`, `{ contents: [...] }`, `{ title, content }`,
+// …). Flatten any of those shapes to the visible text, ignoring metadata such as a
+// node's `title` (which is not part of the assistant's answer).
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    const parts = value
+      .map(extractTextContent)
+      .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    return parts.length ? parts.join('\n\n') : undefined
+  }
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>
+    if (typeof o.text === 'string') return o.text
+    if (typeof o.content === 'string') return o.content
+    const nested = extractTextContent(o.content) ?? extractTextContent(o.contents)
+    if (nested !== undefined) return nested
+  }
+  return undefined
+}
+
 export class StreamTranslator {
   text = ''
   stopReason: string | null = null
@@ -46,14 +69,33 @@ export class StreamTranslator {
   translate(event: DustStreamEvent): AnthropicStreamEvent[] {
     switch (event.type) {
       case 'generation_tokens': {
+        // Dust tags each token with a `classification`. Only `tokens` is the
+        // assistant's actual answer; `chain_of_thought` (and the `opening_delimiter`
+        // / `closing_delimiter` markers) is the reasoning trace and must not leak
+        // into the visible text — otherwise it reads as a garbled preamble and, on
+        // the success-event reconciliation below, blocks the real answer.
+        if (event.classification !== undefined && event.classification !== 'tokens') {
+          return []
+        }
         const text = typeof event.text === 'string' ? event.text : ''
         return this.onText(text)
       }
       case 'agent_message_success':
       case 'agent_message_gracefully_stopped': {
+        const out: AnthropicStreamEvent[] = []
+        // The success event carries the authoritative full answer (`message.content`).
+        // If the answer was not streamed (or only partially), emit the missing part
+        // now so the client always receives the complete response.
         const full = this.extractFullText(event)
-        if (full && !this.text) this.text = full
-        return this.finish('end_turn')
+        if (full) {
+          if (!this.text) {
+            out.push(...this.onText(full))
+          } else if (full.startsWith(this.text) && full.length > this.text.length) {
+            out.push(...this.onText(full.slice(this.text.length)))
+          }
+        }
+        out.push(...this.finish('end_turn'))
+        return out
       }
       case 'agent_generation_cancelled':
         return this.finish('end_turn')
@@ -191,9 +233,18 @@ export class StreamTranslator {
 
   private extractFullText(event: DustStreamEvent): string | undefined {
     const message = event.message as Record<string, unknown> | undefined
-    if (message && typeof message.content === 'string') return message.content
-    if (typeof event.content === 'string') return event.content
-    return undefined
+    if (message) {
+      const fromContent = extractTextContent(message.content)
+      if (fromContent !== undefined) return fromContent
+      const fromContents = extractTextContent(message.contents)
+      if (fromContents !== undefined) return fromContents
+    }
+    const contentView = event.contentView as Record<string, unknown> | undefined
+    if (contentView) {
+      const fromView = extractTextContent(contentView.content)
+      if (fromView !== undefined) return fromView
+    }
+    return extractTextContent(event.content)
   }
 }
 
