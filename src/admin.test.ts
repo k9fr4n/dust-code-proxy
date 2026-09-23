@@ -48,13 +48,6 @@ function buildContext(overrides: Partial<FakeDust> = {}): {
       fake.cleared = true
     },
     listAgents: async () => [{ sId: 'agent-1', name: 'Dev' }],
-    credits: async () => ({
-      source: 'GET /api/v1/w/w-123/credits',
-      plan: 'PRO',
-      allowance: 8000,
-      used: 1200,
-      remaining: 6800,
-    }),
   } as unknown as DustClient
 
   const config = loadConfig({
@@ -118,34 +111,6 @@ describe('admin endpoints', () => {
     })
     expect(res.json()).toMatchObject({ ok: true, was_logged_in: true, workspace: 'w-123' })
     expect(fake.cleared).toBe(true)
-    await app.close()
-  })
-
-  it('returns credit figures', async () => {
-    const app = buildServer(buildContext().ctx)
-    const res = await app.inject({
-      method: 'GET',
-      url: '/internal/credits',
-      headers: { 'x-internal-token': INTERNAL_TOKEN },
-    })
-    expect(res.json()).toMatchObject({
-      workspace: 'w-123',
-      plan: 'PRO',
-      allowance: 8000,
-      used: 1200,
-      remaining: 6800,
-    })
-    await app.close()
-  })
-
-  it('refuses credits when not logged in', async () => {
-    const app = buildServer(buildContext({ creds: null }).ctx)
-    const res = await app.inject({
-      method: 'GET',
-      url: '/internal/credits',
-      headers: { 'x-internal-token': INTERNAL_TOKEN },
-    })
-    expect(res.statusCode).toBe(401)
     await app.close()
   })
 

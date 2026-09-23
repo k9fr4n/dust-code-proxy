@@ -15,7 +15,7 @@ import { secondsUntilExpiry } from './auth/jwt.js'
 // credentials in the running process instead.
 //
 // `status` and `logout` degrade gracefully to the local credentials file when
-// the server is not reachable; `login` and `credits` need it.
+// the server is not reachable; `login` needs it.
 
 export interface CommandOptions {
   force?: boolean
@@ -272,51 +272,6 @@ async function localStatus(config: Config, opts: CommandOptions): Promise<void> 
     `dust auth  : ${payload.dust_auth}${creds ? ` (workspace ${creds.workspaceSid}, file only)` : ''}`,
     `hint       : ${UNREACHABLE_HINT}`,
   ])
-}
-
-// --- credits ----------------------------------------------------------------
-
-export async function credits(config: Config, opts: CommandOptions = {}): Promise<void> {
-  let result: any
-  try {
-    result = await call(config, '/internal/credits')
-  } catch (err) {
-    if (err instanceof ServerUnreachable) {
-      throw new CommandError(`${err.message}\n${UNREACHABLE_HINT}`)
-    }
-    throw err
-  }
-
-  print(opts.json ?? false, result, () => {
-    const lines = [`workspace  : ${result.workspace}`]
-    if (result.plan) lines.push(`plan       : ${result.plan}`)
-    lines.push(
-      `allowance  : ${formatCredits(result.allowance)}`,
-      `used       : ${formatCredits(result.used)}`,
-      `remaining  : ${formatCredits(result.remaining)}`,
-    )
-    if (result.period_start) {
-      lines.push(
-        `period     : ${result.period_start.slice(0, 10)} → ${String(result.period_end).slice(0, 10)}`,
-      )
-    }
-    lines.push(`source     : ${result.source}`)
-    if (result.remaining === null) {
-      lines.push(
-        '',
-        'Dust does not expose a credit balance on the public API. Set DUST_CREDIT_ALLOWANCE',
-        'to your monthly allocation to have "remaining" computed from consumption.',
-      )
-    }
-    return lines
-  })
-}
-
-function formatCredits(value: number | null): string {
-  if (value === null || value === undefined) return 'unknown'
-  return Math.round(value * 100) / 100 === value
-    ? value.toLocaleString('en-US')
-    : value.toFixed(2)
 }
 
 function formatDuration(seconds: number): string {

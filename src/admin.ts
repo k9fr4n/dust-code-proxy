@@ -6,8 +6,7 @@ import { anthropicErrorBody } from './errors.js'
 import { LoginFlowStore, LoginStep } from './auth/login-flow.js'
 import { LOGIN_HINT } from './dust/client.js'
 
-// Admin endpoints backing the `login`, `logout`, `status` and `credits`
-// commands. They all act on the *running* server instance: credentials are
+// Admin endpoints backing the `login`, `logout` and `status` commands. They all act on the *running* server instance: credentials are
 // swapped in memory and the agent list is refreshed, so no restart is needed
 // after a login or a logout.
 //
@@ -73,24 +72,6 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: ServerContext): v
       },
       token_ttl_seconds: info.tokenTtlSeconds,
       credentials_updated_at: info.updatedAt,
-    }
-  })
-
-  app.get('/internal/credits', async (_request, reply) => {
-    if (!ctx.dust.isAuthenticated) await ctx.dust.reload()
-    if (!ctx.dust.isAuthenticated) {
-      return reply.code(401).send(anthropicErrorBody('authentication_error', LOGIN_HINT))
-    }
-    const credits = await ctx.dust.credits()
-    return {
-      workspace: ctx.dust.workspaceId(),
-      source: credits.source,
-      plan: credits.plan ?? null,
-      allowance: credits.allowance ?? null,
-      used: credits.used ?? null,
-      remaining: credits.remaining ?? null,
-      period_start: credits.periodStart ?? null,
-      period_end: credits.periodEnd ?? null,
     }
   })
 

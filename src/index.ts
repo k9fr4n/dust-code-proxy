@@ -5,7 +5,7 @@ import { DustClient } from './dust/client.js'
 import { ModelRouter } from './models.js'
 import { SessionStore } from './sessions.js'
 import { buildServer } from './server.js'
-import { CommandError, CommandOptions, credits, login, logout, status } from './cli.js'
+import { CommandError, CommandOptions, login, logout, status } from './cli.js'
 
 const USAGE = `dust-code-proxy <command>
 
@@ -15,10 +15,9 @@ Commands:
          [--workspace ID]
   logout                 Clear the credentials of the running proxy.
   status                 Show proxy + Dust authentication status.
-  credits                Show credit allowance, consumption and remaining balance.
 
 Options:
-  --json                 Print the raw JSON payload (status, credits, logout).
+  --json                 Print the raw JSON payload (status, logout).
 
 The admin commands talk to the running container over /internal, so run them with:
   docker compose exec proxy proxyctl <command>
@@ -62,9 +61,6 @@ async function main(): Promise<void> {
       return
     case 'status':
       await runCommand(() => status(config, opts))
-      return
-    case 'credits':
-      await runCommand(() => credits(config, opts))
       return
     case 'serve':
       break

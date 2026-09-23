@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-// The admin commands (`login`, `logout`, `status`, `credits`) run with
+// The admin commands (`login`, `logout`, `status`) run with
 // `docker compose exec` and talk to the already-running server over
 // `/internal/*`, which is gated by a shared secret.
 //
