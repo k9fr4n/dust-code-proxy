@@ -146,6 +146,7 @@ npm run dev            # serveur en watch (tsx)
   refusés en entrée. Les tours `tool_result` nécessitent le mode streaming.
 - Les métriques de tokens sont renvoyées à `0` (Dust ne les expose pas au format
   Anthropic).
-- `generation_tokens.classification` est pour l'instant mappé en texte simple (le
-  mapping vers les blocs `thinking` reste à faire une fois les valeurs observées).
+- `generation_tokens.classification` sépare désormais la trace de raisonnement
+  (`chain_of_thought`) de la réponse (`tokens`) : seule la réponse est émise. Le
+  mapping de la trace vers des blocs `thinking` Anthropic reste à faire.
 - Stockage de session en mémoire (une seule instance).

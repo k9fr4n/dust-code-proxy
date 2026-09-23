@@ -37,6 +37,70 @@ describe('StreamTranslator', () => {
     ])
   })
 
+  it('skips chain_of_thought and only emits tokens as text', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    const events = [
+      ...translator.translate(
+        event('generation_tokens', { text: 'reasoning…', classification: 'chain_of_thought' }),
+      ),
+      ...translator.translate(
+        event('generation_tokens', { text: 'hello', classification: 'tokens' }),
+      ),
+      ...translator.translate(
+        event('agent_message_success', { message: { content: 'hello' } }),
+      ),
+    ]
+    expect(translator.text).toBe('hello')
+    const deltas = events
+      .filter((e) => e.type === 'content_block_delta')
+      .map((e) => (e as { delta: { text?: string } }).delta.text)
+    expect(deltas).toEqual(['hello'])
+  })
+
+  it('surfaces the full answer from agent_message_success when no tokens streamed', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    // chain_of_thought streams, but the answer is only delivered on the terminal event.
+    translator.translate(
+      event('generation_tokens', { text: 'thinking', classification: 'chain_of_thought' }),
+    )
+    const events = translator.translate(
+      event('agent_message_success', { message: { content: 'the real answer' } }),
+    )
+    expect(translator.text).toBe('the real answer')
+    expect(events.map((e) => e.type)).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ])
+  })
+
+  it('emits only the missing tail when streamed tokens are a prefix', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    translator.translate(event('generation_tokens', { text: 'hel', classification: 'tokens' }))
+    const events = translator.translate(
+      event('agent_message_success', { message: { content: 'hello world' } }),
+    )
+    expect(translator.text).toBe('hello world')
+    const deltas = events
+      .filter((e) => e.type === 'content_block_delta')
+      .map((e) => (e as { delta: { text?: string } }).delta.text)
+    expect(deltas).toEqual(['lo world'])
+  })
+
+  it('extracts text from structured message.contents', () => {
+    const translator = new StreamTranslator('msg_1', 'model')
+    const events = translator.translate(
+      event('agent_message_success', {
+        message: { contents: [{ title: 'Test', content: 'body text' }] },
+      }),
+    )
+    expect(translator.text).toBe('body text')
+    expect(events.some((e) => e.type === 'content_block_delta')).toBe(true)
+  })
+
   it('maps agent_error to an error event', () => {
     const translator = new StreamTranslator('msg_1', 'model')
     const events = translator.translate(event('agent_error', { message: 'boom' }))
