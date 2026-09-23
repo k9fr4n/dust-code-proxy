@@ -181,7 +181,12 @@ export class DustClient {
       username: this.creds?.username ?? 'proxy',
       fullName: this.creds?.fullName ?? this.creds?.username ?? 'proxy',
       email: this.creds?.email ?? '',
-      origin: 'claude-code-proxy',
+      // Must be one of Dust's `USER_MESSAGE_ORIGINS`. Unknown values are not
+      // rejected: the API's zod schema is `.catch('api')`, so the previous
+      // 'claude-code-proxy' silently became 'api'. Send 'cli' explicitly: the
+      // proxy is driven by a human at a CLI. Never send 'cli_programmatic',
+      // which marks the message as programmatic usage.
+      origin: 'cli',
       clientSideMCPServerIds: clientSideMCPServerIds ?? null,
     }
   }
