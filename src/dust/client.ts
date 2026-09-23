@@ -24,6 +24,13 @@ import {
 export const LOGIN_HINT =
   'Not logged in to Dust. Run: docker compose exec proxy proxyctl login'
 
+// Dust accepts `origin: 'cli'` only for OAuth clients that send this exact
+// User-Agent (see `isUserMessageContextValid` in the Dust API). The proxy
+// mirrors the official CLI's device-code flow, so it identifies the same way:
+// the same User-Agent and the same X-Dust-CLI-Version header.
+export const DUST_CLI_USER_AGENT = 'Dust CLI'
+export const DUST_CLI_VERSION = 'v0.4.6'
+
 export interface PostMessageInput {
   content: string
   agentConfigurationId: string
@@ -181,11 +188,11 @@ export class DustClient {
       username: this.creds?.username ?? 'proxy',
       fullName: this.creds?.fullName ?? this.creds?.username ?? 'proxy',
       email: this.creds?.email ?? '',
-      // Must be one of Dust's `USER_MESSAGE_ORIGINS`. Unknown values are not
-      // rejected: the API's zod schema is `.catch('api')`, so the previous
-      // 'claude-code-proxy' silently became 'api'. Send 'cli' explicitly: the
-      // proxy is driven by a human at a CLI. Never send 'cli_programmatic',
-      // which marks the message as programmatic usage.
+      // Marks the message as interactive (human) rather than programmatic usage:
+      // the proxy is a human driving Claude Code from a terminal. Dust accepts
+      // 'cli' only when the request carries `User-Agent: Dust CLI` over OAuth,
+      // which `request()` now sends (see DUST_CLI_USER_AGENT). Never send
+      // 'cli_programmatic', which books the traffic as programmatic.
       origin: 'cli',
       clientSideMCPServerIds: clientSideMCPServerIds ?? null,
     }
@@ -209,6 +216,8 @@ export class DustClient {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
+          'User-Agent': DUST_CLI_USER_AGENT,
+          'X-Dust-CLI-Version': DUST_CLI_VERSION,
           ...(init.headers ?? {}),
         },
         signal: controller.signal,
@@ -436,7 +445,12 @@ export class DustClient {
     try {
       armIdle()
       const res = await fetch(url, {
-        headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
+        headers: {
+          Accept: 'text/event-stream',
+          Authorization: `Bearer ${token}`,
+          'User-Agent': DUST_CLI_USER_AGENT,
+          'X-Dust-CLI-Version': DUST_CLI_VERSION,
+        },
         signal: controller.signal,
       })
       if (!res.ok || !res.body) {
@@ -473,7 +487,12 @@ export class DustClient {
   ): AsyncGenerator<ParsedMcpRequest> {
     const token = await this.ensureFreshToken()
     const res = await fetch(url, {
-      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${token}`,
+        'User-Agent': DUST_CLI_USER_AGENT,
+        'X-Dust-CLI-Version': DUST_CLI_VERSION,
+      },
       signal: opts?.signal,
     })
     if (!res.ok || !res.body) {
