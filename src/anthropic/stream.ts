@@ -137,10 +137,20 @@ export class StreamTranslator {
       this.blockOpen = false
     }
     const index = this.textBlockEmitted ? 1 : 0
+    // Anthropic streams a tool_use block's input through `input_json_delta`
+    // partial-JSON events, not through `content_block_start.input` (which is always
+    // `{}`). Claude Code rebuilds the input from those deltas (`__json_buf` +
+    // JSON.parse); emitting the input only in `content_block_start` leaves the buffer
+    // empty and its local validation rejects `command` as "unknown".
     out.push({
       type: 'content_block_start',
       index,
-      content_block: { type: 'tool_use', id: toolUseId, name, input },
+      content_block: { type: 'tool_use', id: toolUseId, name, input: {} },
+    })
+    out.push({
+      type: 'content_block_delta',
+      index,
+      delta: { type: 'input_json_delta', partial_json: JSON.stringify(input ?? {}) },
     })
     out.push({ type: 'content_block_stop', index })
     if (!this.finished) {

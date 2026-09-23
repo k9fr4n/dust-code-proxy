@@ -123,6 +123,7 @@ describe('StreamTranslator', () => {
     expect(events.map((e) => e.type)).toEqual([
       'content_block_stop',
       'content_block_start',
+      'content_block_delta',
       'content_block_stop',
       'message_delta',
       'message_stop',
@@ -132,7 +133,12 @@ describe('StreamTranslator', () => {
       type: 'tool_use',
       id: 'toolu_1',
       name: 'bash',
-      input: { command: 'ls' },
+      input: {},
+    })
+    const delta = events[2] as { type: 'content_block_delta'; delta: Record<string, unknown> }
+    expect(delta.delta).toEqual({
+      type: 'input_json_delta',
+      partial_json: '{"command":"ls"}',
     })
     expect(translator.stopReason).toBe('tool_use')
     expect(translator.isFinished()).toBe(true)
