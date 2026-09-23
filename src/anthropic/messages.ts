@@ -64,6 +64,24 @@ function extractText(content: string | ContentBlock[]): string {
     .join('\n\n')
 }
 
+// Claude Code sends a hidden "name this session" request before the first real
+// turn. It carries a distinctive system prompt; detect it so it can be answered
+// locally instead of creating a Dust conversation and burning an agent turn.
+function isNamingRequest(body: MessagesRequest): boolean {
+  if (!body.system) return false
+  return extractText(body.system).includes('naming a coding session')
+}
+
+// Derive a session title from the naming request's content, which wraps the
+// conversation so far in a `<session>…</session>` block. The exact wording is not
+// critical — it is only a label in the session list.
+function sessionTitleFrom(content: string): string {
+  const match = content.match(/<session>([\s\S]*?)<\/session>/)
+  const source = match ? match[1] : content
+  const cleaned = source.replace(/\s+/g, ' ').trim()
+  return cleaned.slice(0, 80) || 'Claude Code session'
+}
+
 function hasUnsupportedBlocks(content: string | ContentBlock[]): boolean {
   if (typeof content === 'string') return false
   return content.some((block) => block.type !== 'text')
@@ -391,6 +409,47 @@ async function handleNonStream(
   })
 }
 
+// Answer Claude Code's hidden "name this session" request without a Dust round-trip.
+// The title is the only thing it needs, so stream (or return) a single JSON title
+// as a normal assistant message.
+async function replySessionTitle(
+  reply: FastifyReply,
+  model: string,
+  title: string,
+  stream: boolean,
+): Promise<void> {
+  const messageId = randomId('msg')
+  const text = JSON.stringify({ title })
+  if (!stream) {
+    reply.send({
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [{ type: 'text', text }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    })
+    return
+  }
+  reply.hijack()
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  const translator = new StreamTranslator(messageId, model)
+  for (const frame of translator.translate({
+    type: 'agent_message_success',
+    message: { content: text },
+  })) {
+    reply.raw.write(serializeSse(frame))
+  }
+  reply.raw.end()
+}
+
 export function buildMessagesHandler(ctx: ServerContext) {
   return async function messagesHandler(
     request: FastifyRequest,
@@ -418,12 +477,25 @@ export function buildMessagesHandler(ctx: ServerContext) {
     }
     const body = parsed.data
 
-    const configurationId = ctx.router.resolve(body.model)
-
     const lastUser = [...body.messages].reverse().find((m) => m.role === 'user')
     if (!lastUser) {
       throw new ProxyError('invalid_request_error', 'No user message found in the request.', 400)
     }
+
+    // Claude Code's hidden "name this session" request is not a real user turn:
+    // answer it locally so it neither creates a Dust conversation nor consumes an
+    // agent turn (previously it opened the conversation and generated the title).
+    if (isNamingRequest(body)) {
+      await replySessionTitle(
+        reply,
+        body.model,
+        sessionTitleFrom(extractText(lastUser.content)),
+        body.stream === true,
+      )
+      return
+    }
+
+    const configurationId = ctx.router.resolve(body.model)
 
     const sessionKey = resolveSessionKey(request, body)
     let session = ctx.sessions.get(sessionKey)
