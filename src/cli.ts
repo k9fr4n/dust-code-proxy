@@ -288,33 +288,30 @@ export async function credits(config: Config, opts: CommandOptions = {}): Promis
   }
 
   print(opts.json ?? false, result, () => {
-    const lines = [`workspace  : ${result.workspace}`]
-    if (result.plan) lines.push(`plan       : ${result.plan}`)
-    lines.push(
-      `allowance  : ${formatCredits(result.allowance)}`,
+    const window = [result.timeframe, result.window_kind].filter(Boolean).join(', ')
+    const lines = [
+      `workspace  : ${result.workspace}`,
+      `window     : ${window || 'unknown'}`,
+      `limit      : ${formatCredits(result.limit)}`,
       `used       : ${formatCredits(result.used)}`,
       `remaining  : ${formatCredits(result.remaining)}`,
-    )
-    if (result.period_start) {
-      lines.push(
-        `period     : ${result.period_start.slice(0, 10)} → ${String(result.period_end).slice(0, 10)}`,
+    ]
+    if (result.next_reset_at) {
+      const seconds = Math.round(
+        (new Date(result.next_reset_at).getTime() - Date.now()) / 1000,
       )
+      lines.push(`next refill: ${result.next_reset_at} (${formatDuration(seconds)})`)
     }
-    lines.push(`source     : ${result.source}`)
-    if (result.remaining === null) {
-      lines.push(
-        '',
-        'Dust does not expose a credit balance on the public API. Set DUST_CREDIT_ALLOWANCE',
-        'to your monthly allocation to have "remaining" computed from consumption.',
-      )
+    for (const refill of result.refill_schedule ?? []) {
+      lines.push(`  ${refill.date}  +${formatCredits(refill.credits)}`)
     }
     return lines
   })
 }
 
-function formatCredits(value: number | null): string {
+function formatCredits(value: number | null | undefined): string {
   if (value === null || value === undefined) return 'unknown'
-  return Math.round(value * 100) / 100 === value
+  return Math.round(value) === value
     ? value.toLocaleString('en-US')
     : value.toFixed(2)
 }

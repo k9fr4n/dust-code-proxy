@@ -64,7 +64,7 @@ réutilisées).
 | `login` | Flux device-code piloté par le serveur : URL + code, sélection du workspace, installation à chaud. |
 | `logout` | Purge les credentials (mémoire + fichier) et les sessions. |
 | `status` | Version/uptime/port du proxy, `dust_auth`, workspace, région, utilisateur, TTL du token, nb de modèles et de sessions. |
-| `credits` | Allocation, consommation et solde restant (voir ci-dessous). |
+| `credits` | Limite, consommation et solde de crédits *fair use* (voir ci-dessous). |
 
 `status` et `logout` fonctionnent en mode dégradé si le serveur est injoignable
 (lecture / purge du fichier de credentials) ; `login` et `credits` exigent un
@@ -81,17 +81,23 @@ conteneur. Aucun secret par défaut n'est donc exposé sur le port publié.
 ### Crédits restants
 
 L'API publique Dust documente la *consommation*
-(`POST /api/v1/w/{wId}/analytics/consumption/export`) mais aucun endpoint de
-solde. `credits` procède donc en deux temps :
+(`POST /api/v1/w/{wId}/analytics/consumption/export`, réservée aux admins) mais
+aucun endpoint de solde. `credits` interroge donc l'endpoint utilisé par
+l'application web, `GET /api/w/{wId}/fair-use-credits` : non documenté, mais il
+accepte le même jeton OAuth que l'API publique et ne demande pas de rôle admin.
 
-1. sondage de quelques endpoints de solde candidats (non documentés, utilisés par
-   l'application web ; ignorés s'ils répondent 404/403) ;
-2. repli sur l'export de consommation du mois calendaire en cours pour obtenir
-   les crédits **consommés**, et déduction du restant si l'allocation est connue
-   via `DUST_CREDIT_ALLOWANCE` (500 free / 8 000 pro / 40 000 max par siège).
+```json
+{ "fairUseAwuCreditsState": {
+    "limit": 20000, "count": 17342, "timeframe": "week",
+    "windowKind": "rolling", "nextResetAt": "2026-09-23T19:23:03.021Z",
+    "refillSchedule": [ { "date": "2026-09-23", "credits": 190 } ] } }
+```
 
-Les champs inconnus sont affichés `unknown` plutôt que `0`. L'export de
-consommation requiert un rôle admin sur le workspace.
+`count` est le nombre de crédits **consommés** dans la fenêtre : le solde vaut
+`limit - count`. La fenêtre étant glissante (`rolling`), rien n'est réattribué à
+une date fixe — les crédits reviennent au fur et à mesure que la consommation
+sort de la fenêtre, ce que détaille `refillSchedule` (`nextResetAt` n'est que le
+plus proche de ces réapprovisionnements).
 
 ## Configuration
 
@@ -109,7 +115,6 @@ consommation requiert un rôle admin sur le workspace.
 | `DUST_MCP_SERVER_NAME` | `claude-code-proxy` | Nom du serveur MCP enregistré auprès de Dust (5–30 caractères). |
 | `DUST_MCP_HEARTBEAT_INTERVAL_MS` | `240000` | Période du heartbeat MCP (Dust impose ≤ 5 min ; marge de sécurité). |
 | `DUST_MCP_RECONNECT_DELAY_MS` | `5000` | Délai de reconnexion du flux SSE `mcp/requests`. |
-| `DUST_CREDIT_ALLOWANCE` | *(vide)* | Allocation mensuelle de crédits, pour calculer le solde restant. |
 | `INTERNAL_TOKEN` | *(vide)* | Jeton des endpoints `/internal/*`. Vide → généré dans `INTERNAL_TOKEN_FILE`. |
 | `INTERNAL_TOKEN_FILE` | `<dir de DUST_CREDENTIAL_FILE>/internal-token` | Emplacement du jeton généré. |
 | `PROXY_ADMIN_URL` | `http://127.0.0.1:<PORT>` | URL utilisée par `proxyctl` pour joindre le serveur. |
@@ -147,7 +152,7 @@ Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONF
 | `POST /internal/sessions` | Créer/consulter une session (clé `session`). |
 | `DELETE /internal/sessions/:id` | Réinitialiser une session (mapping local uniquement). |
 | `GET /internal/status` | État détaillé proxy + Dust (`proxyctl status`). |
-| `GET /internal/credits` | Crédits alloués / consommés / restants (`proxyctl credits`). |
+| `GET /internal/credits` | Limite, consommation et solde de crédits (`proxyctl credits`). |
 | `POST /internal/logout` | Purge des credentials et des sessions (`proxyctl logout`). |
 | `POST /internal/login/start` | Démarre un flux device-code (`{ force }`). |
 | `POST /internal/login/poll` | Sonde le flux (`{ flow }`) → `pending`/`select_workspace`/`authorized`/… |

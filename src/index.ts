@@ -15,7 +15,7 @@ Commands:
          [--workspace ID]
   logout                 Clear the credentials of the running proxy.
   status                 Show proxy + Dust authentication status.
-  credits                Show credit allowance, consumption and remaining balance.
+  credits                Show the fair-use credit limit, usage and balance.
 
 Options:
   --json                 Print the raw JSON payload (status, credits, logout).

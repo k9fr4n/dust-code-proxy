@@ -49,11 +49,14 @@ function buildContext(overrides: Partial<FakeDust> = {}): {
     },
     listAgents: async () => [{ sId: 'agent-1', name: 'Dev' }],
     credits: async () => ({
-      source: 'GET /api/v1/w/w-123/credits',
-      plan: 'PRO',
-      allowance: 8000,
-      used: 1200,
-      remaining: 6800,
+      source: 'GET /api/w/w-123/fair-use-credits',
+      limit: 20000,
+      used: 17342,
+      remaining: 2658,
+      timeframe: 'week',
+      windowKind: 'rolling',
+      nextResetAt: '2026-09-23T19:23:03.021Z',
+      refillSchedule: [{ date: '2026-09-23', credits: 190 }],
     }),
   } as unknown as DustClient
 
@@ -130,10 +133,11 @@ describe('admin endpoints', () => {
     })
     expect(res.json()).toMatchObject({
       workspace: 'w-123',
-      plan: 'PRO',
-      allowance: 8000,
-      used: 1200,
-      remaining: 6800,
+      limit: 20000,
+      used: 17342,
+      remaining: 2658,
+      timeframe: 'week',
+      window_kind: 'rolling',
     })
     await app.close()
   })

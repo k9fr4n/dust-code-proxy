@@ -18,9 +18,6 @@ services:
       # back when exec'd into the container.
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
       INTERNAL_TOKEN_FILE: /data/internal-token
-      # Monthly credit allocation, used to compute the remaining balance from
-      # consumption (Dust exposes no balance endpoint). Optional.
-      DUST_CREDIT_ALLOWANCE: ${DUST_CREDIT_ALLOWANCE:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DUST_CONNECT_TIMEOUT_MS: ${DUST_CONNECT_TIMEOUT_MS:-}
       DUST_CREATE_MESSAGE_TIMEOUT_MS: ${DUST_CREATE_MESSAGE_TIMEOUT_MS:-}
