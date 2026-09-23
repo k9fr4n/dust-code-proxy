@@ -1,62 +1,52 @@
-# Agents Dust disponibles
+# Modèles disponibles dans le workspace Dust
 
-Liste des agents Dust du workspace (nom → sId), pour remplir `models.json`
-ou `DUST_DEFAULT_AGENT_CONFIGURATION_ID`.
+Catalogue **fournisseur** : les LLM que le workspace peut exécuter. C'est la
+sortie de :
 
-## Exemple de routage
-
-`models.json` mappe un **modèle** (la valeur de `ANTHROPIC_MODEL`, sensible à la casse)
-vers un agent Dust :
-
-```json
-{
-  "claude-sonnet-5":  { "configurationId": "dLy1V6JMMD" },
-  "claude-opus-5":    { "configurationId": "AcqnwSyy7X" },
-  "claude-4.5-haiku": { "configurationId": "ggKOhTwS8Y" }
-}
+```bash
+docker compose exec proxy proxyctl models      # [--all] [--json]
 ```
 
-Sans entrée correspondante, le proxy retombe sur `DUST_DEFAULT_AGENT_CONFIGURATION_ID`.
+À ne pas confondre avec `models.json`, qui associe les noms de modèles envoyés
+par Claude Code à des **agents** Dust. Pour lister les agents et leurs `sId`,
+utiliser `proxyctl agents`.
 
-## Agents (nom → sId)
+| Provider | Model ID | Nom | Contexte | Max out | Drapeaux |
+| --- | --- | --- | ---: | ---: | --- |
+| openai | `gpt-6-astra` | GPT 6 Astra | 272k | 64k | latest vision reasoning:light/medium/high |
+| openai | `gpt-6-sol` | GPT 6 Sol | 272k | 64k | latest vision reasoning:none/light/medium/high |
+| openai | `gpt-6-luna` | GPT 6 Luna | 272k | 64k | latest vision reasoning:none/light/medium/high |
+| openai | `gpt-5.6-sol` | GPT 5.6 Sol | 272k | 64k | vision reasoning:none/light/medium/high |
+| openai | `gpt-5.6-terra` | GPT 5.6 Terra | 272k | 64k | latest vision reasoning:none/light/medium/high |
+| openai | `gpt-5.6-luna` | GPT 5.6 Luna | 272k | 64k | vision reasoning:none/light/medium/high |
+| openai | `gpt-5.4-mini` | GPT-5.4 Mini | 400k | 128k | vision reasoning:none/light/medium/high |
+| openai | `gpt-5.4-nano` | GPT-5.4 Nano | 400k | 128k | vision reasoning:none/light/medium/high |
+| anthropic | `claude-opus-5-5` | Claude Opus 5.5 | 250k | 64k | latest vision reasoning:light/medium/high |
+| anthropic | `claude-opus-5` | Claude Opus 5 | 250k | 64k | vision reasoning:light/medium/high |
+| anthropic | `claude-sonnet-5` | Claude Sonnet 5 | 250k | 64k | latest vision reasoning:light/medium/high |
+| anthropic | `claude-opus-4-8` | Claude Opus 4.8 | 250k | 64k | vision reasoning:light/medium/high |
+| anthropic | `claude-sonnet-4-6` | Claude Sonnet 4.6 | 250k | 64k | vision reasoning:light/medium/high |
+| anthropic | `claude-haiku-4-5-20251001` | Claude 4.5 Haiku | 180k | 64k | latest vision reasoning:light/medium/high |
+| mistral | `mistral-large-latest` | Mistral Large | 256k | 2k | latest vision reasoning:none |
+| mistral | `mistral-medium-3-5` | Mistral Medium 3.5 | 256k | 2k | latest vision reasoning:none/high |
+| mistral | `mistral-small-latest` | Mistral Small | 128k | 2k | vision reasoning:none |
+| mistral | `codestral-latest` | Mistral Codestral | 128k | 2k | reasoning:none |
+| google_ai_studio | `gemini-3.8-flash` | Gemini 3.8 Flash | 1049k | 66k | latest vision reasoning:light/medium/high |
+| google_ai_studio | `gemini-3.7-flash` | Gemini 3.7 Flash | 1000k | 64k | vision reasoning:light/medium/high |
+| google_ai_studio | `gemini-3.5-flash-lite` | Gemini 3.5 Flash Lite | 1000k | 64k | latest vision reasoning:none/light/medium/high |
+| google_ai_studio | `gemini-3.1-pro-preview` | Gemini 3.1 Pro (Preview) | 1000k | 64k | latest vision reasoning:light/medium/high |
+| google_ai_studio | `gemini-3.1-flash-lite` | Gemini 3.1 Flash Lite | 1000k | 64k | vision reasoning:none/light/medium/high |
+| fireworks | `accounts/fireworks/models/deepseek-v4p1-flash` | DeepSeek V4.1 Flash | 256k | 64k | latest vision reasoning:none/light/medium/high |
+| fireworks | `accounts/fireworks/models/kimi-k3` | Kimi K3 | 256k | 64k | latest vision reasoning:light/medium/high |
+| fireworks | `accounts/fireworks/models/glm-5p3` | GLM-5.3 | 1000k | 128k | latest reasoning:light/medium/high |
+| fireworks | `accounts/fireworks/models/glm-5p3-flash` | GLM-5.3 Flash | 256k | 64k | latest vision reasoning:light/medium/high |
+| fireworks | `accounts/fireworks/models/inkling` | Inkling | 1000k | 64k | latest vision reasoning:light/medium/high |
+| auto_fast | `auto_fast` | Basic | 1000k | 64k | latest reasoning:none |
+| auto | `auto` | Standard | 1000k | 64k | latest reasoning:none |
+| auto_complex | `auto_complex` | Premium | 1000k | 64k | latest reasoning:none |
 
-| Nom | sId |
-| --- | --- |
-| help | `helper` |
-| dust | `dust` |
-| deep-dive | `deep-dive` |
-| Claude_4.5_Haiku | `ggKOhTwS8Y` |
-| Claude_Opus_4.7 | `z2HGYsuGK9` |
-| Claude_Opus_4.8 | `RhBIx43D31` |
-| Claude_Opus_5 | `AcqnwSyy7X` |
-| Claude_Sonnet_5 | `dLy1V6JMMD` |
-| CoachSportif | `zM1KrvMBuA` |
-| DeepSeek_V4_Flash | `ZbRlBVVhKn` |
-| DeepSeek_V4_Pro | `R6ngzOLYky` |
-| EUDONET | `yxoJbkIo9E` |
-| gemini_3.1_flash_lite | `vKlPXzu04M` |
-| Gemini_3.1_Pro_Light | `aWhpI3f5NV` |
-| Gemini_3.7_Flash_Light | `fJKmwT1kgk` |
-| GeminiFlash | `ndqxZ1vu5s` |
-| GLM-5.2 | `4SwINqW6jM` |
-| GPT_5.6_Luna | `6kvfVFW2pU` |
-| GPT_5.6_Sol | `VGtoCTcIyq` |
-| GPT_5.6_Terra | `AEibOi8uBK` |
-| GTP_6_ASTRA | `A1Nkjixwhm` |
-| Imager | `yyEPVXukeP` |
-| Interne | `PwEHxDbV1I` |
-| KDustCoder | `SutxSaDW3Y` |
-| Kimi_K3 | `3ET2GwfGYs` |
-| KungFuMaster | `4PYH13fOBs` |
-| OPTAVIS | `CB3vuTzbqM` |
-| OPUS | `7azUWpqJi2` |
-| PSAuditor | `E3dnpHFniO` |
-| PSCoder | `ICxLwKnsHP` |
-| PSWinOps | `YAHEL4kAOi` |
-| StravaDashboardAI | `ow1BRXWVRs` |
-| TFProviderExpert | `GChx6I2FD5` |
-| ThrukMCPBridge | `y8sifD1Gxs` |
-| WALLIX | `YYxnHVC0hA` |
-| WAM | `f2GMVUtesj` |
-| WAMIMG | `0FcA7idZ1E` |
-| WinEngineer | `6ZtSNMVBpF` |
+Les trois dernières lignes (`auto_fast`, `auto`, `auto_complex`) ne sont pas de
+vrais modèles mais les paliers de routage de Dust ; `proxyctl models` affiche en
+fin de sortie le modèle concret vers lequel chacun pointe actuellement.
+
+Ce catalogue est un instantané : relancer `proxyctl models` pour l'état courant.
