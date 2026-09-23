@@ -22,9 +22,6 @@ export interface Config {
   dustSpaceId: string | undefined
   dustDefaultAgentConfigurationId: string | undefined
   dustForwardSystem: boolean
-  // Monthly credit allowance, used to derive "remaining" when the Dust API only
-  // reports consumption (see src/dust/credits.ts).
-  dustCreditAllowance: number | undefined
   modelsFile: string
   mcpServerName: string
   mcpHeartbeatIntervalMs: number
@@ -72,9 +69,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dustDefaultAgentConfigurationId:
       env.DUST_DEFAULT_AGENT_CONFIGURATION_ID || undefined,
     dustForwardSystem: boolValue(env.DUST_FORWARD_SYSTEM, true),
-    dustCreditAllowance: env.DUST_CREDIT_ALLOWANCE
-      ? intValue(env.DUST_CREDIT_ALLOWANCE, 0) || undefined
-      : undefined,
     modelsFile: env.MODELS_FILE ?? './models.json',
     mcpServerName: env.DUST_MCP_SERVER_NAME ?? 'claude-code-proxy',
     mcpHeartbeatIntervalMs: intValue(env.DUST_MCP_HEARTBEAT_INTERVAL_MS, 4 * 60 * 1000),

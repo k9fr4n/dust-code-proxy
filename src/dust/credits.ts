@@ -1,197 +1,87 @@
+import { z } from 'zod'
+import { ProxyError } from '../errors.js'
+
 // Credit balance reporting.
 //
-// [hypothèse] The public Dust API (v1) documents credit *consumption*
-// (`POST /api/v1/w/{wId}/analytics/consumption/export`) but no "remaining
-// credits" endpoint. So the lookup is two-tiered:
+// The public Dust API (v1) documents credit *consumption*
+// (`POST /api/v1/w/{wId}/analytics/consumption/export`, admin-only) but no
+// "remaining credits" endpoint. The web app reads the balance from
+// `GET /api/w/{wId}/fair-use-credits`: undocumented, but it accepts the same
+// WorkOS bearer token as the public API and needs no admin role.
 //
-//   1. probe a short list of candidate balance endpoints and parse whatever
-//      shape comes back (they exist for the web app, are undocumented, and may
-//      404 or 403 depending on region/plan/role);
-//   2. fall back to the documented consumption export over the current billing
-//      period to report credits *used*, and derive what is left when the
-//      allowance is known (`DUST_CREDIT_ALLOWANCE`).
+// Observed payload (eu.dust.tt):
 //
-// Every field is optional: a caller must render "unknown" rather than 0.
+//   { "fairUseAwuCreditsState": {
+//       "limit": 20000, "count": 17342, "timeframe": "week",
+//       "windowKind": "rolling", "nextResetAt": "2026-09-23T19:23:03.021Z",
+//       "refillSchedule": [ { "date": "2026-09-23", "credits": 190 }, … ] } }
+//
+// `count` is the amount *used* inside the window, so the balance is
+// `limit - count`. With a rolling window nothing is granted at a fixed date:
+// credits come back as old spend ages out, which is what `refillSchedule`
+// describes (`nextResetAt` is only the closest of those refills).
+
+export const CREDITS_PATH = '/api/w/{ws}/fair-use-credits'
+
+export interface CreditRefill {
+  date: string
+  credits: number
+}
 
 export interface CreditsInfo {
   source: string
-  plan?: string
-  allowance?: number
-  used?: number
-  remaining?: number
-  periodStart?: string
-  periodEnd?: string
+  limit: number
+  used: number
+  remaining: number
+  timeframe?: string
+  windowKind?: string
+  nextResetAt?: string
+  refillSchedule: CreditRefill[]
 }
 
-const ALLOWANCE_KEYS = [
-  'creditsAllowance',
-  'creditsIncluded',
-  'creditsGranted',
-  'creditsTotal',
-  'totalCredits',
-  'allowance',
-  'included',
-  'quota',
-  'limit',
-]
+// Only `limit` and `count` are required: the rest is display sugar and must not
+// make the command fail if Dust renames or drops it.
+const stateSchema = z.object({
+  limit: z.number(),
+  count: z.number(),
+  timeframe: z.string().nullish(),
+  windowKind: z.string().nullish(),
+  nextResetAt: z.union([z.string(), z.number()]).nullish(),
+  refillSchedule: z
+    .array(z.object({ date: z.string(), credits: z.number() }))
+    .nullish(),
+})
 
-const USED_KEYS = [
-  'creditsUsed',
-  'creditsConsumed',
-  'creditsSpent',
-  'usedCredits',
-  'consumedCredits',
-  'used',
-  'consumed',
-  'consumption',
-]
+const responseSchema = z.object({ fairUseAwuCreditsState: stateSchema })
 
-const REMAINING_KEYS = [
-  'creditsRemaining',
-  'creditsLeft',
-  'creditsBalance',
-  'remainingCredits',
-  'balance',
-  'remaining',
-  'left',
-]
-
-const PLAN_KEYS = ['planCode', 'planName', 'plan', 'code', 'name', 'tier']
-const PERIOD_START_KEYS = ['startDate', 'periodStart', 'currentPeriodStart', 'start']
-const PERIOD_END_KEYS = ['endDate', 'periodEnd', 'currentPeriodEnd', 'end']
-
-// Breadth-first walk over the response body: the value we want is sometimes at
-// the root, sometimes under `subscription`, `plan`, `credits` or `workspace`.
-function findValue(
-  json: unknown,
-  keys: string[],
-  accept: (value: unknown) => boolean,
-): unknown {
-  const queue: unknown[] = [json]
-  const seen = new Set<unknown>()
-  const wanted = new Set(keys.map((k) => k.toLowerCase()))
-  while (queue.length) {
-    const node = queue.shift()
-    if (!node || typeof node !== 'object' || seen.has(node)) continue
-    seen.add(node)
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      if (wanted.has(key.toLowerCase()) && accept(value)) return value
-      if (value && typeof value === 'object') queue.push(value)
-    }
-  }
-  return undefined
-}
-
-const isFiniteNumber = (value: unknown): boolean =>
-  (typeof value === 'number' && Number.isFinite(value)) ||
-  (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value)))
-
-function findNumber(json: unknown, keys: string[]): number | undefined {
-  const value = findValue(json, keys, isFiniteNumber)
-  return value === undefined ? undefined : Number(value)
-}
-
-function findString(json: unknown, keys: string[]): string | undefined {
-  const value = findValue(json, keys, (v) => typeof v === 'string' && v !== '')
-  return value === undefined ? undefined : String(value)
+function toIsoDate(value: string | number): string {
+  if (typeof value === 'number') return new Date(value).toISOString()
+  return value
 }
 
 export function parseCredits(json: unknown, source: string): CreditsInfo {
-  const allowance = findNumber(json, ALLOWANCE_KEYS)
-  const used = findNumber(json, USED_KEYS)
-  const explicitRemaining = findNumber(json, REMAINING_KEYS)
-  const remaining =
-    explicitRemaining ??
-    (allowance !== undefined && used !== undefined ? allowance - used : undefined)
+  const parsed = responseSchema.safeParse(json)
+  if (!parsed.success) {
+    throw new ProxyError(
+      'api_error',
+      `Unexpected credit payload from Dust (${source}): ${parsed.error.issues
+        .map((i) => `${i.path.join('.')} ${i.message}`)
+        .join(', ')}`,
+      502,
+    )
+  }
+  const state = parsed.data.fairUseAwuCreditsState
   return {
     source,
-    plan: findString(json, PLAN_KEYS),
-    allowance,
-    used,
-    remaining,
-    periodStart: findString(json, PERIOD_START_KEYS),
-    periodEnd: findString(json, PERIOD_END_KEYS),
+    limit: state.limit,
+    used: state.count,
+    remaining: state.limit - state.count,
+    timeframe: state.timeframe ?? undefined,
+    windowKind: state.windowKind ?? undefined,
+    nextResetAt:
+      state.nextResetAt === null || state.nextResetAt === undefined
+        ? undefined
+        : toIsoDate(state.nextResetAt),
+    refillSchedule: state.refillSchedule ?? [],
   }
-}
-
-export function hasCreditFigures(info: CreditsInfo): boolean {
-  return (
-    info.allowance !== undefined ||
-    info.used !== undefined ||
-    info.remaining !== undefined
-  )
-}
-
-// Candidate "balance" endpoints, most specific first. `{ws}` is substituted with
-// the workspace sId.
-export const CREDIT_BALANCE_PATHS = [
-  '/api/v1/w/{ws}/credits',
-  '/api/v1/w/{ws}/subscriptions',
-  '/api/w/{ws}/credits',
-  '/api/w/{ws}/subscriptions',
-  '/api/w/{ws}/usage/credits',
-]
-
-// Current UTC calendar month, used as the billing period for the consumption
-// fallback. [hypothèse] Dust bills credits per calendar month.
-export function currentPeriod(now: Date = new Date()): {
-  startDate: string
-  endDate: string
-} {
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-  return { startDate: start.toISOString(), endDate: now.toISOString() }
-}
-
-// The consumption export streams one row per billed call, as CSV or JSON. Sum
-// the credit column whatever it is called.
-export function sumConsumption(body: string): number | undefined {
-  const trimmed = body.trim()
-  if (!trimmed) return undefined
-  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-    return sumConsumptionJson(trimmed)
-  }
-  return sumConsumptionCsv(trimmed)
-}
-
-function sumConsumptionJson(body: string): number | undefined {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(body)
-  } catch {
-    return undefined
-  }
-  const rows = Array.isArray(parsed)
-    ? parsed
-    : ((parsed as Record<string, unknown>)?.rows ??
-       (parsed as Record<string, unknown>)?.data ??
-       [])
-  if (!Array.isArray(rows)) return undefined
-  let total = 0
-  let seen = false
-  for (const row of rows) {
-    const value = findNumber(row, ['credits', 'credit', 'creditCost', 'cost'])
-    if (value !== undefined) {
-      total += value
-      seen = true
-    }
-  }
-  return seen ? total : undefined
-}
-
-function sumConsumptionCsv(body: string): number | undefined {
-  const lines = body.split('\n').filter((l) => l.trim() !== '')
-  if (lines.length < 2) return undefined
-  const header = lines[0].split(',').map((h) => h.trim().replace(/^"|"$/g, '').toLowerCase())
-  const index = header.findIndex((h) => h === 'credits' || h === 'credit' || h === 'credit_cost')
-  if (index < 0) return undefined
-  let total = 0
-  let seen = false
-  for (const line of lines.slice(1)) {
-    const raw = line.split(',')[index]?.trim().replace(/^"|"$/g, '')
-    if (raw && Number.isFinite(Number(raw))) {
-      total += Number(raw)
-      seen = true
-    }
-  }
-  return seen ? total : undefined
 }

@@ -85,12 +85,13 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: ServerContext): v
     return {
       workspace: ctx.dust.workspaceId(),
       source: credits.source,
-      plan: credits.plan ?? null,
-      allowance: credits.allowance ?? null,
-      used: credits.used ?? null,
-      remaining: credits.remaining ?? null,
-      period_start: credits.periodStart ?? null,
-      period_end: credits.periodEnd ?? null,
+      limit: credits.limit,
+      used: credits.used,
+      remaining: credits.remaining,
+      timeframe: credits.timeframe ?? null,
+      window_kind: credits.windowKind ?? null,
+      next_reset_at: credits.nextResetAt ?? null,
+      refill_schedule: credits.refillSchedule,
     }
   })
 
