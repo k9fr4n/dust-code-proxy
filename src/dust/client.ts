@@ -307,6 +307,37 @@ export class DustClient {
     return parseAgentConfigurations(json)
   }
 
+  // Routing agent index: the public list (sId + name — the exact set the proxy has
+  // always routed against), enriched best-effort with the manage view so the router
+  // can resolve a `models.json` `configurationId` that names a modelId instead of an
+  // sId. The manage view is undocumented, so its failure must not break routing:
+  // on error we fall back to the public list, where sId/name resolution still works
+  // and modelId routing is simply unavailable.
+  async listRoutingAgents(): Promise<DustAgentConfig[]> {
+    const agents = await this.listAgents()
+    try {
+      const manage = await this.agentList()
+      const bySid = new Map(manage.agents.map((a) => [a.sId, a]))
+      return agents.map((a) => {
+        const detail = bySid.get(a.sId)
+        return {
+          sId: a.sId,
+          name: a.name,
+          modelId: detail?.modelId,
+          scope: detail?.scope,
+          status: detail?.status,
+          userFavorite: detail?.userFavorite,
+        }
+      })
+    } catch (err) {
+      this.logger?.warn?.(
+        { err },
+        'Could not enrich the agent list with modelId (manage view); modelId routing is disabled',
+      )
+      return agents
+    }
+  }
+
   async createConversation(
     title: string,
     message: PostMessageInput,

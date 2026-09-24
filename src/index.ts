@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   void (async () => {
     if (!dust.isAuthenticated) return
     try {
-      const agents = await dust.listAgents()
+      const agents = await dust.listRoutingAgents()
       router.setAgents(agents)
       const missing = router.missingMappedIds()
       if (missing.length) {

@@ -37,7 +37,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: ServerContext): v
 
   const refreshAgents = async (): Promise<number | null> => {
     try {
-      const agents = await ctx.dust.listAgents()
+      const agents = await ctx.dust.listRoutingAgents()
       ctx.router.setAgents(agents)
       const missing = ctx.router.missingMappedIds()
       if (missing.length) {

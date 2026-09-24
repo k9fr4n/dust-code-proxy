@@ -7,6 +7,14 @@
 export interface DustAgentConfig {
   sId: string
   name: string
+  // Enrichment from the manage view (see `DustClient.listRoutingAgents`): used by
+  // the router to resolve a `models.json` `configurationId` that is a modelId (or
+  // to disambiguate several agents sharing one). Absent when the public list is
+  // used without enrichment — sId/name routing still works, modelId routing is off.
+  modelId?: string
+  scope?: string
+  status?: string
+  userFavorite?: boolean
 }
 
 export interface DustMessageInfo {
