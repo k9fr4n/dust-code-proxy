@@ -60,7 +60,7 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
   app.get('/v1/models', async () => {
     if (ctx.dust.isAuthenticated) {
       try {
-        ctx.router.setAgents(await ctx.dust.listAgents())
+        ctx.router.setAgents(await ctx.dust.listRoutingAgents())
       } catch (err) {
         app.log.warn({ err }, 'Failed to refresh Dust agents for /v1/models')
       }

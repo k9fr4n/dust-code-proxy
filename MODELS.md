@@ -8,8 +8,9 @@ docker compose exec proxy proxyctl models      # [--all] [--json]
 ```
 
 À ne pas confondre avec `models.json`, qui associe les noms de modèles envoyés
-par Claude Code à des **agents** Dust. Pour lister les agents et leurs `sId`,
-utiliser `proxyctl agents`.
+par Claude Code à des **agents** Dust (par `sId`, par nom d'agent, ou par
+`modelId` — ce catalogue-ci fournit les `modelId` utilisables). Pour lister les
+agents et leurs `sId`, utiliser `proxyctl agents`.
 
 | Provider | Model ID | Nom | Contexte | Max out | Drapeaux |
 | --- | --- | --- | ---: | ---: | --- |

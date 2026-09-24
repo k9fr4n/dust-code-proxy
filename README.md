@@ -189,16 +189,22 @@ C'est la commande à utiliser pour récupérer les `sId` à coller dans
 ```json
 {
   "dust-coding-agent": { "configurationId": "cfg_coding" },
-  "dust-fast-agent": { "configurationId": "cfg_fast" },
-  "claude-sonnet-4-5": { "configurationId": "cfg_coding" },
-  "claude-opus-4-6": { "configurationId": "cfg_coding" },
-  "claude-haiku-4-5": { "configurationId": "cfg_fast" }
+  "claude-sonnet-4-5": { "configurationId": "claude-sonnet-5" },
+  "claude-haiku-4-5": { "configurationId": "claude-haiku-4-5-20251001" }
 }
 ```
 
-Les `configurationId` sont les `sId` réels de tes agents Dust (listés par
-`proxyctl agents`). Au démarrage (et sur `GET /v1/models`), le
-proxy rafraîchit cette liste et log un avertissement si un id mappé n'existe pas.
+Un `configurationId` peut être :
+
+- le **`sId`** de l'agent — la valeur la plus stable, listée par `proxyctl agents` ;
+- le **nom** de l'agent (ex. `Claude_Sonnet_5`) ;
+- le **`modelId`** du LLM exécuté par l'agent (ex. `claude-sonnet-5`) : le proxy
+  route alors vers l'agent qui exécute ce modèle.
+
+Au démarrage (et sur `GET /v1/models`), le proxy rafraîchit la liste des agents et
+log un avertissement si un id mappé ne correspond à rien. Quand plusieurs agents
+exécutent le même `modelId`, le choix est déterministe : actif avant archivé, puis
+personnel (`hidden`) avant partagé/global, puis favori, puis le plus petit `sId`.
 
 Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONFIGURATION_ID`
 → nom/`sId` d'agent connu. Sinon erreur `not_found_error`.
