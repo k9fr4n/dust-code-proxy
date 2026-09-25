@@ -365,31 +365,41 @@ export async function models(config: Config, opts: CommandOptions = {}): Promise
 }
 
 // Emits a Claude Code `modelPicker` config (for ~/.claude/settings.json) listing
-// every selectable catalog model, so the /model picker shows the full Dust
-// catalog — not just the claude*/anthropic* ids Claude Code's gateway discovery
-// keeps. `model` is the provider modelId (routed by the proxy), `label` the
-// display name. Models with no Dust agent are flagged: the proxy cannot route
-// them, so selecting one fails until an agent runs that model.
+// what the proxy can actually route: the catalog models that run on a Dust agent,
+// then the Dust agents themselves. Catalog models with no agent are omitted —
+// selecting one would fall through to the default agent (or fail), which is
+// misleading. `model` is the provider modelId or the agent name, both routed by
+// the proxy.
 async function printModelPicker(config: Config, result: any): Promise<void> {
-  let routable = new Set<string>()
+  let agents: any[] = []
   try {
-    const agents = await call(config, '/internal/agents')
-    for (const agent of agents?.agents ?? []) {
-      if (agent.modelId) routable.add(agent.modelId)
-    }
+    const res = await call(config, '/internal/agents')
+    agents = res?.agents ?? []
   } catch {
-    // Agents list unavailable: emit the picker without routability flags.
+    // Agents list unavailable: emit only the models we can still infer as routable.
   }
-  const all: any[] = result.models ?? []
-  const options = all
-    .filter((m) => m.isSelectable !== false)
-    .map((m) => ({
-      model: m.modelId,
-      label: m.displayName ?? m.modelId,
-      description: routable.has(m.modelId)
-        ? m.providerId
-        : `${m.providerId} — no Dust agent, will fail`,
-    }))
+  const routable = new Set<string>()
+  for (const agent of agents) {
+    if (agent.modelId) routable.add(agent.modelId)
+  }
+  const options: any[] = []
+  // Catalog models that route to a specific Dust agent, in catalog order.
+  for (const m of result.models ?? []) {
+    if (m.isSelectable === false) continue
+    if (!routable.has(m.modelId)) continue
+    options.push({ model: m.modelId, label: m.displayName ?? m.modelId, description: m.providerId })
+  }
+  // Dust agents, so a specific agent can be picked directly by name.
+  const shown = agents
+    .filter((a) => a.status !== 'archived')
+    .sort((a, b) => a.name.localeCompare(b.name))
+  for (const agent of shown) {
+    options.push({
+      model: agent.name,
+      label: agent.name,
+      description: agent.modelId ? `agent · ${agent.modelId}` : 'agent',
+    })
+  }
   console.log(
     JSON.stringify({ modelPicker: { replaceBuiltInOptions: true, options } }, null, 2),
   )
