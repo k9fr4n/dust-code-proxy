@@ -161,37 +161,6 @@ describe('ModelRouter modelId fallback in resolve', () => {
   })
 })
 
-describe('ModelRouter routableModels', () => {
-  const routed: DustAgentConfig[] = [
-    { sId: 'sSonnet', name: 'Claude_Sonnet_5', modelId: 'claude-sonnet-5' },
-    { sId: 'sHaiku', name: 'Claude_4.5_Haiku', modelId: 'claude-haiku-4-5-20251001' },
-  ]
-
-  it('returns the deduped union of mapping keys, sIds, names and modelIds', () => {
-    const router = new ModelRouter({ sonnet: { configurationId: 'sSonnet' } })
-    router.setAgents(routed)
-    const ids = router.routableModels().map((r) => r.id).sort()
-    expect(ids).toEqual([
-      'Claude_4.5_Haiku',
-      'Claude_Sonnet_5',
-      'claude-haiku-4-5-20251001',
-      'claude-sonnet-5',
-      'sHaiku',
-      'sSonnet',
-      'sonnet',
-    ])
-  })
-
-  it('carries the agent name as displayName for sIds and names, none for modelIds', () => {
-    const router = new ModelRouter({})
-    router.setAgents(routed)
-    const byId = new Map(router.routableModels().map((r) => [r.id, r.displayName]))
-    expect(byId.get('sSonnet')).toBe('Claude_Sonnet_5')
-    expect(byId.get('Claude_Sonnet_5')).toBe('Claude_Sonnet_5')
-    expect(byId.get('claude-sonnet-5')).toBeUndefined()
-  })
-})
-
 describe('ModelRouter modelsForAgent and missingMappedIds', () => {
   const routed: DustAgentConfig[] = [
     { sId: 'sSonnet', name: 'Claude_Sonnet_5', modelId: 'claude-sonnet-5' },
