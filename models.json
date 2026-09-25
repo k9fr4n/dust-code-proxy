@@ -1,15 +1,15 @@
 {
     "claude-fable-5": {
-        "configurationId": "claude-opus-5-5"
+        "configurationId": "claude-opus-5"
     },
     "claude-opus-5-5": {
-        "configurationId": "claude-opus-5-5"
+        "configurationId": "claude-opus-5"
     },
     "claude-opus-5": {
-        "configurationId": "claude-opus-5-5"
+        "configurationId": "claude-opus-5"
     },
     "opus": {
-        "configurationId": "claude-opus-5-5"
+        "configurationId": "claude-opus-5"
     },
     "claude-sonnet-5": {
         "configurationId": "claude-sonnet-5"
