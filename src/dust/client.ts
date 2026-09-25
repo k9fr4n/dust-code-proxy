@@ -43,6 +43,22 @@ function isRetryableDustStatus(status: number): boolean {
   return status === 429 || status >= 500
 }
 
+// Network-level stream failures that are safe to recover from by re-opening the SSE
+// stream from the last event id: the upstream (or a CDN in front of it) dropped the
+// connection. Caller-driven aborts (AbortError) are cancellation, never a drop. Our
+// own idle timeout is also recoverable this way — the generation simply went quiet.
+export function isTransientStreamError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name
+  if (name === 'AbortError') return false
+  if (err instanceof ProxyError) {
+    return err.message.includes('No Dust event received')
+  }
+  const msg = err instanceof Error ? err.message : String(err)
+  return /terminated|other side closed|fetch failed|network error|socket closed|connection reset|ETIMEDOUT|ECONNRESET|ECONNREFUSED/.test(
+    msg,
+  )
+}
+
 export interface PostMessageInput {
   content: string
   agentConfigurationId: string
