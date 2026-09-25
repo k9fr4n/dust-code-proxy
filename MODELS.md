@@ -4,7 +4,7 @@ Catalogue **fournisseur** : les LLM que le workspace peut exécuter. C'est la
 sortie de :
 
 ```bash
-docker compose exec proxy proxyctl models      # [--all] [--json]
+docker compose exec proxy proxyctl models      # [--all] [--json] [--picker]
 ```
 
 À ne pas confondre avec `models.json`, qui associe les noms de modèles envoyés
@@ -13,8 +13,10 @@ par Claude Code à des **agents** Dust (par `sId`, par nom d'agent, ou par
 agents et leurs `sId`, utiliser `proxyctl agents`.
 
 Le sélecteur `/model` de Claude Code (via `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`)
-n'affiche que les modèles dont l'id contient `claude` ou `anthropic` ; ce tableau
-reste la référence pour le catalogue complet.
+n'affiche que les modèles dont l'id contient `claude` ou `anthropic`. Pour y
+lister **tout** ce tableau, générer la config `modelPicker` avec
+`proxyctl models --picker` et la coller dans `~/.claude/settings.json` ; les
+modèles sans agent Dust y sont marqués « will fail ».
 
 | Provider | Model ID | Nom | Contexte | Max out | Drapeaux |
 | --- | --- | --- | ---: | ---: | --- |

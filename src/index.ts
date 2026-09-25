@@ -26,6 +26,8 @@ Commands:
   status                 Show proxy + Dust authentication status.
   credits                Show the fair-use credit limit, usage and balance.
   models [--all]         List the LLMs available in the Dust workspace.
+         [--picker]      models: print a Claude Code modelPicker config
+                         (~/.claude/settings.json) listing the full catalog.
   agents [--all]         List the Dust agents (routing targets of models.json).
 
 Options:
@@ -34,6 +36,8 @@ Options:
   --all                  models: include the models Dust marks as not
                          selectable for this workspace.
                          agents: include the archived agents.
+  --picker               models: emit a modelPicker config for the /model
+                         picker instead of the table.
 
 The admin commands talk to the running container over /internal, so run them with:
   docker compose exec proxy proxyctl <command>
@@ -46,6 +50,7 @@ function parseOptions(argv: string[]): CommandOptions {
     all: argv.includes('--all'),
     workspace: wsIdx >= 0 ? argv[wsIdx + 1] : undefined,
     json: argv.includes('--json'),
+    picker: argv.includes('--picker'),
   }
 }
 
