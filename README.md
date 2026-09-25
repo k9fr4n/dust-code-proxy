@@ -48,7 +48,7 @@ docker compose exec proxy proxyctl login      # [--force] [--workspace <sId>]
 docker compose exec proxy proxyctl logout
 docker compose exec proxy proxyctl status
 docker compose exec proxy proxyctl credits
-docker compose exec proxy proxyctl models      # [--all]
+docker compose exec proxy proxyctl models      # [--all] [--picker]
 docker compose exec proxy proxyctl agents      # [--all]
 ```
 
@@ -69,7 +69,7 @@ réutilisées).
 | `logout` | Purge les credentials (mémoire + fichier) et les sessions. |
 | `status` | Version/uptime/port du proxy, `dust_auth`, workspace, région, utilisateur, TTL du token, nb de modèles et de sessions. |
 | `credits` | Limite, consommation et solde de crédits *fair use* (voir ci-dessous). |
-| `models` | Catalogue des LLM disponibles dans le workspace Dust (voir ci-dessous). |
+| `models` | Catalogue des LLM disponibles dans le workspace Dust ; `--picker` émet une config `modelPicker` pour Claude Code (voir ci-dessous). |
 | `agents` | Agents Dust du workspace, avec leur `sId` et le mapping `models.json` (voir ci-dessous). |
 
 `status` et `logout` fonctionnent en mode dégradé si le serveur est injoignable
@@ -133,14 +133,21 @@ qui associe les noms de modèles envoyés par Claude Code à des agents Dust.
 
 #### Modèles dans `/model`
 
-Lancé avec `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, Claude Code peuple le
-sélecteur `/model` depuis le `GET /v1/models` du proxy : il y liste les modèles
-**routables** (agents + `models.json`), avec leur nom d'affichage tiré de ce
-catalogue. Limite côté client : Claude Code ne retient que les entrées dont l'id
-contient `claude` ou `anthropic`, donc seuls les modèles Claude/Anthropic du
-workspace apparaissent — les lignes openai/mistral/gemini/fireworks de
-`proxyctl models` ne peuvent pas y figurer. Pour le catalogue complet, utiliser
-`docker compose exec proxy proxyctl models`.
+La découverte gateway de Claude Code (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`,
+via `GET /v1/models`) ne retient que les ids contenant `claude` ou `anthropic` :
+elle ne peut donc montrer que le sous-ensemble Claude/Anthropic du catalogue.
+Pour afficher **tout** le catalogue dans `/model`, utiliser la config `modelPicker`
+(ids arbitraires acceptés « verbatim »), générée par le proxy :
+
+```bash
+docker compose exec proxy proxyctl models --picker
+```
+
+Coller la sortie JSON dans `~/.claude/settings.json` (clé `modelPicker`). Chaque
+entrée pointe le `modelId` du catalogue, que le proxy route vers l'agent qui
+l'exécute. Les modèles **sans agent Dust** sont marqués « no Dust agent, will
+fail » : ils s'affichent dans `/model` mais la sélection échoue tant qu'aucun
+agent ne les exécute (créer l'agent côté Dust pour les rendre utilisables).
 
 ### Agents du workspace
 

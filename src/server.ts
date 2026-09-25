@@ -65,28 +65,35 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
         app.log.warn({ err }, 'Failed to refresh Dust agents for /v1/models')
       }
     }
-    // Display names/descriptions come from the Dust provider catalog; on failure
-    // the list still serves, just without them.
-    let catalogByName = new Map<string, { displayName?: string; description?: string }>()
+    // Union of everything the proxy accepts as a `model`: the routable ids
+    // (models.json keys + agent sIds/names/modelIds) plus the full Dust provider
+    // catalog. Display names/descriptions come from the catalog; on failure the
+    // list still serves, just without them.
+    const byId = new Map<string, { displayName?: string; description?: string }>()
+    for (const r of ctx.router.routableModels()) {
+      if (!byId.has(r.id)) byId.set(r.id, { displayName: r.displayName })
+    }
     if (ctx.dust.isAuthenticated) {
       try {
         const catalog = await ctx.dust.modelCatalog()
-        catalogByName = new Map(
-          catalog.models.map((m) => [
-            m.modelId,
-            { displayName: m.displayName, description: m.description },
-          ]),
-        )
+        for (const m of catalog.models) {
+          if (m.isSelectable === false) continue
+          byId.set(m.modelId, {
+            ...byId.get(m.modelId),
+            displayName: m.displayName,
+            description: m.description,
+          })
+        }
       } catch (err) {
         app.log.warn({ err }, 'Failed to load Dust model catalog for /v1/models')
       }
     }
-    const data = ctx.router.routableModels().map((r) => ({
-      id: r.id,
+    const data = [...byId].map(([id, meta]) => ({
+      id,
       object: 'model',
       type: 'model',
-      display_name: catalogByName.get(r.id)?.displayName ?? r.displayName,
-      description: catalogByName.get(r.id)?.description,
+      display_name: meta.displayName,
+      description: meta.description,
     }))
     return {
       data,

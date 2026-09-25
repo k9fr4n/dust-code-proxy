@@ -22,6 +22,7 @@ export interface CommandOptions {
   workspace?: string
   json?: boolean
   all?: boolean
+  picker?: boolean
 }
 
 class ServerUnreachable extends Error {}
@@ -325,6 +326,11 @@ export async function models(config: Config, opts: CommandOptions = {}): Promise
     throw err
   }
 
+  if (opts.picker) {
+    await printModelPicker(config, result)
+    return
+  }
+
   print(opts.json ?? false, result, () => {
     const all: any[] = result.models ?? []
     // Non-selectable models are still listed by Dust (deprecated, flagged off
@@ -356,6 +362,37 @@ export async function models(config: Config, opts: CommandOptions = {}): Promise
     }
     return lines
   })
+}
+
+// Emits a Claude Code `modelPicker` config (for ~/.claude/settings.json) listing
+// every selectable catalog model, so the /model picker shows the full Dust
+// catalog — not just the claude*/anthropic* ids Claude Code's gateway discovery
+// keeps. `model` is the provider modelId (routed by the proxy), `label` the
+// display name. Models with no Dust agent are flagged: the proxy cannot route
+// them, so selecting one fails until an agent runs that model.
+async function printModelPicker(config: Config, result: any): Promise<void> {
+  let routable = new Set<string>()
+  try {
+    const agents = await call(config, '/internal/agents')
+    for (const agent of agents?.agents ?? []) {
+      if (agent.modelId) routable.add(agent.modelId)
+    }
+  } catch {
+    // Agents list unavailable: emit the picker without routability flags.
+  }
+  const all: any[] = result.models ?? []
+  const options = all
+    .filter((m) => m.isSelectable !== false)
+    .map((m) => ({
+      model: m.modelId,
+      label: m.displayName ?? m.modelId,
+      description: routable.has(m.modelId)
+        ? m.providerId
+        : `${m.providerId} — no Dust agent, will fail`,
+    }))
+  console.log(
+    JSON.stringify({ modelPicker: { replaceBuiltInOptions: true, options } }, null, 2),
+  )
 }
 
 // --- agents -----------------------------------------------------------------
