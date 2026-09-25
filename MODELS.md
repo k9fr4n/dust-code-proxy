@@ -12,6 +12,10 @@ par Claude Code à des **agents** Dust (par `sId`, par nom d'agent, ou par
 `modelId` — ce catalogue-ci fournit les `modelId` utilisables). Pour lister les
 agents et leurs `sId`, utiliser `proxyctl agents`.
 
+Le sélecteur `/model` de Claude Code (via `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`)
+n'affiche que les modèles dont l'id contient `claude` ou `anthropic` ; ce tableau
+reste la référence pour le catalogue complet.
+
 | Provider | Model ID | Nom | Contexte | Max out | Drapeaux |
 | --- | --- | --- | ---: | ---: | --- |
 | openai | `gpt-6-astra` | GPT 6 Astra | 272k | 64k | latest vision reasoning:light/medium/high |

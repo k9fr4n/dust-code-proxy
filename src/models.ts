@@ -68,6 +68,10 @@ export class ModelRouter {
     }
     const byName = this.agentsByName.get(model.toLowerCase())
     if (byName) return byName.sId
+    // Fall back to the provider modelId: lets a catalog id (e.g. claude-opus-4-8)
+    // route to the agent running that model even without a models.json entry.
+    const byModel = this.agentsByModelId.get(model.toLowerCase())
+    if (byModel?.length) return preferredAgent(byModel).sId
     throw new ProxyError(
       'not_found_error',
       `No Dust agent configured for model "${model}". Add it to models.json or set DUST_DEFAULT_AGENT_CONFIGURATION_ID.`,
@@ -79,6 +83,24 @@ export class ModelRouter {
     const ids = new Set<string>(Object.keys(this.mapping))
     for (const agent of this.agentsBySid.values()) ids.add(agent.sId)
     return [...ids]
+  }
+
+  // Every identifier the proxy can route, with a best-effort display name. Serves
+  // GET /v1/models (Claude Code gateway discovery): the union of models.json keys,
+  // agent sIds, agent names and agent modelIds. `displayName` is the agent name for
+  // sIds/names; modelIds are left unnamed here and enriched from the Dust catalog
+  // by the caller.
+  routableModels(): { id: string; displayName?: string }[] {
+    const out = new Map<string, string | undefined>()
+    for (const model of Object.keys(this.mapping)) {
+      if (!out.has(model)) out.set(model, undefined)
+    }
+    for (const agent of this.agentsBySid.values()) {
+      if (!out.has(agent.sId)) out.set(agent.sId, agent.name)
+      if (!out.has(agent.name)) out.set(agent.name, agent.name)
+      if (agent.modelId && !out.has(agent.modelId)) out.set(agent.modelId, undefined)
+    }
+    return [...out].map(([id, displayName]) => ({ id, displayName }))
   }
 
   // Claude Code model names that route to a given Dust agent. Used by

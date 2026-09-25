@@ -25,6 +25,7 @@ Lancer Claude Code :
 ANTHROPIC_BASE_URL="http://localhost:8080" \
 ANTHROPIC_API_KEY="local-proxy-key" \
 ANTHROPIC_MODEL="dust-coding-agent" \
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
 claude
 ```
 
@@ -129,6 +130,17 @@ Les modèles marqués non sélectionnables pour le workspace sont masqués sauf 
 
 Attention à ne pas confondre ce catalogue **fournisseur** avec `models.json`,
 qui associe les noms de modèles envoyés par Claude Code à des agents Dust.
+
+#### Modèles dans `/model`
+
+Lancé avec `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, Claude Code peuple le
+sélecteur `/model` depuis le `GET /v1/models` du proxy : il y liste les modèles
+**routables** (agents + `models.json`), avec leur nom d'affichage tiré de ce
+catalogue. Limite côté client : Claude Code ne retient que les entrées dont l'id
+contient `claude` ou `anthropic`, donc seuls les modèles Claude/Anthropic du
+workspace apparaissent — les lignes openai/mistral/gemini/fireworks de
+`proxyctl models` ne peuvent pas y figurer. Pour le catalogue complet, utiliser
+`docker compose exec proxy proxyctl models`.
 
 ### Agents du workspace
 

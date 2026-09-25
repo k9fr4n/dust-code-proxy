@@ -65,8 +65,29 @@ export function buildServer(ctx: ServerContext): FastifyInstance {
         app.log.warn({ err }, 'Failed to refresh Dust agents for /v1/models')
       }
     }
-    const ids = ctx.router.listModels()
-    const data = ids.map((id) => ({ id, object: 'model', type: 'model' }))
+    // Display names/descriptions come from the Dust provider catalog; on failure
+    // the list still serves, just without them.
+    let catalogByName = new Map<string, { displayName?: string; description?: string }>()
+    if (ctx.dust.isAuthenticated) {
+      try {
+        const catalog = await ctx.dust.modelCatalog()
+        catalogByName = new Map(
+          catalog.models.map((m) => [
+            m.modelId,
+            { displayName: m.displayName, description: m.description },
+          ]),
+        )
+      } catch (err) {
+        app.log.warn({ err }, 'Failed to load Dust model catalog for /v1/models')
+      }
+    }
+    const data = ctx.router.routableModels().map((r) => ({
+      id: r.id,
+      object: 'model',
+      type: 'model',
+      display_name: catalogByName.get(r.id)?.displayName ?? r.displayName,
+      description: catalogByName.get(r.id)?.description,
+    }))
     return {
       data,
       has_more: false,
