@@ -30,6 +30,7 @@ function config(overrides: Partial<Config> = {}): Config {
     mcpServerName: 'test-bridge',
     mcpHeartbeatIntervalMs: 60_000,
     mcpReconnectDelayMs: 60_000,
+    timeouts: { createMessageMs: 1000 },
     ...overrides,
   } as Config
 }
@@ -85,7 +86,9 @@ describe('SessionMcp', () => {
     expect(emitted[0]).toMatchObject({ name: 'echo', input: { text: 'hi' } })
 
     const toolUseId = emitted[0].toolUseId
-    expect(bridge.resolveToolResult(toolUseId, 'hi back', false)).toBe(true)
+    await expect(bridge.resolveToolResult(toolUseId, 'hi back', false)).resolves.toEqual({
+      status: 'delivered',
+    })
 
     await vi.waitFor(() => expect(ep.postMcpResult).toHaveBeenCalled())
     const [serverId, result] = ep.postMcpResult.mock.calls[0]
@@ -95,6 +98,35 @@ describe('SessionMcp', () => {
       id: 42,
       result: { content: [{ type: 'text', text: 'hi back' }], isError: false },
     })
+    await bridge.close()
+  })
+
+  it('reports a failed delivery when Dust rejects the result', async () => {
+    const ep = makeEndpoint({
+      postMcpResult: vi.fn(async () => {
+        throw new Error('upstream 502')
+      }),
+    })
+    const bridge = new SessionMcp(ep, config())
+    await bridge.start([ECHO])
+
+    const emitted: { toolUseId: string }[] = []
+    bridge.setEmitter({
+      emitToolUse(toolUseId) {
+        emitted.push({ toolUseId })
+      },
+    })
+
+    onmessage(bridge)({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { name: 'echo', arguments: {} },
+    })
+    await vi.waitFor(() => expect(emitted).toHaveLength(1))
+
+    const outcome = await bridge.resolveToolResult(emitted[0].toolUseId, 'x', false)
+    expect(outcome).toMatchObject({ status: 'failed' })
     await bridge.close()
   })
 
@@ -116,8 +148,12 @@ describe('SessionMcp', () => {
     await vi.waitFor(() => expect(emitted).toHaveLength(2))
 
     // Resolve out of order.
-    expect(bridge.resolveToolResult(emitted[1].toolUseId, 'two', false)).toBe(true)
-    expect(bridge.resolveToolResult(emitted[0].toolUseId, 'one', false)).toBe(true)
+    await expect(bridge.resolveToolResult(emitted[1].toolUseId, 'two', false)).resolves.toEqual({
+      status: 'delivered',
+    })
+    await expect(bridge.resolveToolResult(emitted[0].toolUseId, 'one', false)).resolves.toEqual({
+      status: 'delivered',
+    })
 
     await vi.waitFor(() => expect(ep.postMcpResult).toHaveBeenCalledTimes(2))
     const posted = ep.postMcpResult.mock.calls.map(([, r]) => (r as { id: number }).id).sort()
@@ -125,10 +161,12 @@ describe('SessionMcp', () => {
     await bridge.close()
   })
 
-  it('returns false when resolving an unknown tool_use_id', async () => {
+  it('returns unknown when resolving an unknown tool_use_id', async () => {
     const bridge = new SessionMcp(makeEndpoint(), config())
     await bridge.start([ECHO])
-    expect(bridge.resolveToolResult('toolu_missing', 'x', false)).toBe(false)
+    await expect(bridge.resolveToolResult('toolu_missing', 'x', false)).resolves.toEqual({
+      status: 'unknown',
+    })
     await bridge.close()
   })
 

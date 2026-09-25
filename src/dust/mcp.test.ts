@@ -150,6 +150,40 @@ describe('DustMcpTransport', () => {
     await transport.close()
   })
 
+  it('reports delivery outcome via onMessageDelivered', async () => {
+    const ep = endpoint()
+    const delivered: { id: unknown; ok: boolean }[] = []
+    const transport = new DustMcpTransport({
+      endpoint: ep,
+      serverName: 'test-server',
+      onMessageDelivered: (id, ok) => delivered.push({ id, ok }),
+    })
+    await transport.start()
+    await flush()
+    await transport.send({ jsonrpc: '2.0', id: 1, result: { content: [] } } as never)
+    expect(delivered).toEqual([{ id: 1, ok: true }])
+    await transport.close()
+  })
+
+  it('reports a failed delivery outcome when the post throws', async () => {
+    const ep = endpoint({
+      postMcpResult: vi.fn(async () => {
+        throw new Error('upstream 502')
+      }),
+    })
+    const delivered: { id: unknown; ok: boolean }[] = []
+    const transport = new DustMcpTransport({
+      endpoint: ep,
+      serverName: 'test-server',
+      onMessageDelivered: (id, ok) => delivered.push({ id, ok }),
+    })
+    await transport.start()
+    await flush()
+    await transport.send({ jsonrpc: '2.0', id: 1, result: { content: [] } } as never)
+    expect(delivered).toEqual([{ id: 1, ok: false }])
+    await transport.close()
+  })
+
   it('reports an error when send() is called before registration', async () => {
     const ep = endpoint()
     const onError = vi.fn()

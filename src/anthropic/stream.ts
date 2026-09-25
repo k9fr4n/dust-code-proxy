@@ -62,6 +62,10 @@ export class StreamTranslator {
   private textBlockEmitted = false
   private toolUseCount = 0
 
+  // Tool-use blocks emitted this turn, retained so a non-streaming collector can
+  // render them as `tool_use` content blocks instead of SSE input_json_delta frames.
+  toolUses: { id: string; name: string; input: unknown }[] = []
+
   constructor(
     private readonly messageId: string,
     private readonly model: string,
@@ -132,6 +136,7 @@ export class StreamTranslator {
   emitToolUseBlock(toolUseId: string, name: string, input: unknown): AnthropicStreamEvent[] {
     // A turn already ended (end_turn/error) cannot also emit a tool_use.
     if (this.finished) return []
+    this.toolUses.push({ id: toolUseId, name, input })
     const out: AnthropicStreamEvent[] = []
     if (!this.messageStarted) {
       out.push(this.messageStart())

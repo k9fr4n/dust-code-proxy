@@ -33,6 +33,16 @@ export const LOGIN_HINT =
 export const DUST_CLI_USER_AGENT = 'Dust CLI'
 export const DUST_CLI_VERSION = 'v0.4.6'
 
+// Tool-result delivery (`POST mcp/results`) retry policy: a transient 5xx/429 from
+// Dust would otherwise park the agent generation indefinitely. Backoff is short
+// because these are upstream hiccups, not sustained outages.
+const MCP_RESULT_MAX_ATTEMPTS = 3
+const MCP_RESULT_RETRY_DELAYS_MS = [500, 1500]
+
+function isRetryableDustStatus(status: number): boolean {
+  return status === 429 || status >= 500
+}
+
 export interface PostMessageInput {
   content: string
   agentConfigurationId: string
@@ -654,27 +664,52 @@ export class DustClient {
     return parsed.data
   }
 
+  // Delivering a tool result is what unparks the Dust generation. A transient 5xx
+  // here would otherwise park the agent forever (the error is swallowed upstream),
+  // so retry transient failures before giving up. 4xx (expired/invalid serverId) is
+  // not retried: it needs a re-registration, not a replay.
   async postMcpResult(
     serverId: string,
     result: unknown,
   ): Promise<{ success: boolean }> {
     const ws = this.workspaceId()
-    const res = await this.request(
-      `/api/v1/w/${ws}/mcp/results`,
-      { method: 'POST', body: JSON.stringify({ serverId, result }) },
-      this.config.timeouts.createMessageMs,
-    )
-    const json = await res.json().catch(() => null)
-    if (!res.ok) throw this.mapDustError(res.status, json)
-    const parsed = postMcpResultsResponseSchema.safeParse(json)
-    if (!parsed.success) {
-      throw new ProxyError(
-        'api_error',
-        `Unexpected mcp/results response: ${JSON.stringify(json)}`,
-        502,
-      )
+    const attempts = MCP_RESULT_MAX_ATTEMPTS
+    let lastErr: Error | null = null
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, MCP_RESULT_RETRY_DELAYS_MS[attempt - 1] ?? 1500))
+      }
+      let res: Response
+      try {
+        res = await this.request(
+          `/api/v1/w/${ws}/mcp/results`,
+          { method: 'POST', body: JSON.stringify({ serverId, result }) },
+          this.config.timeouts.createMessageMs,
+        )
+      } catch (err) {
+        // Network error (fetch rejects): retryable.
+        lastErr = err instanceof Error ? err : new Error(String(err))
+        continue
+      }
+      const json = await res.json().catch(() => null)
+      if (!res.ok) {
+        const err = this.mapDustError(res.status, json)
+        if (!isRetryableDustStatus(res.status)) throw err
+        lastErr = err
+        continue
+      }
+      const parsed = postMcpResultsResponseSchema.safeParse(json)
+      if (!parsed.success) {
+        throw new ProxyError(
+          'api_error',
+          `Unexpected mcp/results response: ${JSON.stringify(json)}`,
+          502,
+        )
+      }
+      return parsed.data
     }
-    return parsed.data
+    throw lastErr ?? new ProxyError('api_error', 'mcp/results failed', 502)
   }
 
   streamMcpRequests(

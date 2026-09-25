@@ -261,6 +261,12 @@ Pendant le tour :
 4. le proxy poste le résultat à Dust via `mcp/results` et reprend le streaming du
    même message Dust (`lastEventId`) pour émettre la suite.
 
+La livraison du résultat (`mcp/results`) est réessayée sur erreur transitoire
+(5xx/429), car un échec silencieux laisserait la génération Dust « parkée » jusqu'au
+timeout d'inactivité du flux. Si Claude Code retente une reprise interrompue avec
+`stream: false`, la reprise est collectée et renvoyée en JSON (non-streaming) au lieu
+d'être rejetée.
+
 Le transport implémente le heartbeat (ré-enregistrement immédiat en cas d'échec) et
 la reconnexion indéfinie du flux SSE sur erreur. La validation des `input_schema` des
 outils se fait par conversion JSON-Schema → Zod (sous-ensemble courant ; repli vers un
@@ -285,7 +291,8 @@ npm run dev            # serveur en watch (tsx)
 ## Limites connues
 
 - Les blocs `image`/`document` (contenu non-textuel autre que les outils) restent
-  refusés en entrée. Les tours `tool_result` nécessitent le mode streaming.
+  refusés en entrée. Les tours `tool_result` sont repris en mode streaming **et**
+  non-streaming (Claude Code retente une reprise interrompue avec `stream: false`).
 - Les métriques de tokens sont renvoyées à `0` (Dust ne les expose pas au format
   Anthropic).
 - `generation_tokens.classification` sépare désormais la trace de raisonnement
