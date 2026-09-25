@@ -51,6 +51,10 @@ export interface DustMcpTransportOptions {
   // The SDK's `McpServer.connect()` takes ownership of `Transport.onerror`, so this
   // separate callback is how the caller observes internal transport errors.
   onError?: (error: Error) => void
+  // Fired after `send()` finishes posting a JSON-RPC message to Dust, keyed by the
+  // message's JSON-RPC `id`. Lets the caller await (and react to) tool-result
+  // delivery instead of leaving a parked generation to time out silently.
+  onMessageDelivered?: (messageId: unknown, ok: boolean, error?: Error) => void
 }
 
 export class DustMcpTransport implements Transport {
@@ -88,17 +92,26 @@ export class DustMcpTransport implements Transport {
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
+    const messageId = (message as { id?: unknown }).id
     if (!this.serverId) {
-      this.reportError(new Error('MCP server not registered; cannot send result.'))
+      const err = new Error('MCP server not registered; cannot send result.')
+      this.reportError(err)
+      this.options.onMessageDelivered?.(messageId, false, err)
       return
     }
     try {
       const res = await this.options.endpoint.postMcpResult(this.serverId, message)
       if (res.success === false) {
-        this.reportError(new Error('Dust rejected the MCP result (success: false).'))
+        const err = new Error('Dust rejected the MCP result (success: false).')
+        this.reportError(err)
+        this.options.onMessageDelivered?.(messageId, false, err)
+        return
       }
+      this.options.onMessageDelivered?.(messageId, true)
     } catch (err) {
-      this.reportError(err instanceof Error ? err : new Error(String(err)))
+      const e = err instanceof Error ? err : new Error(String(err))
+      this.reportError(e)
+      this.options.onMessageDelivered?.(messageId, false, e)
     }
   }
 

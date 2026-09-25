@@ -112,14 +112,6 @@ function extractToolResults(content: string | ContentBlock[]): ToolResultBlock[]
   return results
 }
 
-// Summarize the block types of a message's content for diagnostics (a plain-string
-// content is a single `text` block). Used to tell a `tool_result` continuation apart
-// from a replayed history in logs, without dumping the content itself.
-function contentBlockTypes(content: string | ContentBlock[]): (string | undefined)[] {
-  if (typeof content === 'string') return ['text']
-  return content.map((block) => block.type)
-}
-
 // Coerce the free-form `tools[]` into the narrow shape the bridge needs. Anything
 // that lacks a `name` is dropped; malformed `input_schema` falls back to `undefined`
 // and the bridge's `jsonSchemaToZod` maps it to a loose record.
@@ -418,6 +410,93 @@ async function handleNonStream(
   })
 }
 
+// Resume a parked Dust generation without streaming, collecting the assistant's
+// answer (and any further tool calls) into a single JSON `message`. This is the
+// non-streaming counterpart of `streamTurn`: Claude Code sends a tool_result
+// continuation with `stream: false` when retrying after a stalled streaming resume.
+async function collectTurn(
+  ctx: ServerContext,
+  model: string,
+  conversationId: string,
+  agentMessageId: string,
+  session: Session,
+  resumeLastEventId?: string,
+): Promise<{ id: string; content: Record<string, unknown>[]; stopReason: string }> {
+  const messageId = randomId('msg')
+  const translator = new StreamTranslator(messageId, model)
+  const bridge = session.mcp as SessionMcp | undefined
+  const disconnect = new AbortController()
+  let toolUseEnded = false
+
+  let toolUseFlushTimer: NodeJS.Timeout | null = null
+  const flushToolUse = () => {
+    if (toolUseFlushTimer) {
+      clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = null
+    }
+    translator.finishToolUse()
+    toolUseEnded = true
+    // Stop reading the message events stream: the agent is now waiting on the next
+    // tool result. Do NOT cancel — the next tool-result turn resumes this stream.
+    disconnect.abort()
+  }
+
+  bridge?.setEmitter({
+    emitToolUse(toolUseId, name, input) {
+      translator.emitToolUseBlock(toolUseId, name, input)
+      if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
+      toolUseFlushTimer = setTimeout(flushToolUse, TOOL_USE_FLUSH_DELAY_MS)
+    },
+  })
+
+  try {
+    for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
+      lastEventId: resumeLastEventId,
+      signal: disconnect.signal,
+    })) {
+      if (event.kind === 'done') break
+      if (event.kind !== 'event') continue
+      if (event.eventId) session.lastEventId = event.eventId
+
+      if (event.type === 'tool_approve_execution') {
+        const actionId = event.data.actionId
+        const messageId = event.data.messageId
+        if (typeof actionId === 'string' && typeof messageId === 'string') {
+          await ctx.dust.validateAction(conversationId, messageId, actionId, 'approved')
+        }
+        continue
+      }
+
+      translator.translate(event.data)
+      if (translator.isFinished()) break
+      if (isTerminalDustEvent(event.type)) break
+    }
+    if (!translator.isFinished()) translator.finishExternally()
+  } catch (err) {
+    if (toolUseEnded || disconnect.signal.aborted) {
+      // Ended by tool_use (parked) or an external abort.
+    } else if (err instanceof ProxyError) {
+      throw err
+    } else {
+      throw new ProxyError('api_error', (err as Error).message ?? 'Stream error', 502)
+    }
+  } finally {
+    if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
+    bridge?.setEmitter(null)
+  }
+
+  if (translator.errored) {
+    throw new ProxyError('api_error', translator.errorMessage, 502)
+  }
+
+  const content: Record<string, unknown>[] = []
+  if (translator.text) content.push({ type: 'text', text: translator.text })
+  for (const toolUse of translator.toolUses) {
+    content.push({ type: 'tool_use', id: toolUse.id, name: toolUse.name, input: toolUse.input })
+  }
+  return { id: messageId, content, stopReason: translator.stopReason ?? 'end_turn' }
+}
+
 // Answer Claude Code's hidden "name this session" request without a Dust round-trip.
 // The title is the only thing it needs, so stream (or return) a single JSON title
 // as a normal assistant message.
@@ -516,37 +595,10 @@ export function buildMessagesHandler(ctx: ServerContext) {
     const toolResults = extractToolResults(lastUser.content)
 
     if (toolResults.length > 0) {
-      // Tool-result turn: resolve the parked calls and resume the parked Dust
-      // generation from where the previous turn ended — no new user message.
-      if (body.stream !== true) {
-        // Diagnostic for "Tool-result continuation requires streaming": log what
-        // actually arrived so a resume/retry (non-streaming replay) can be told
-        // apart from a missing or forged `stream` flag.
-        request.log.warn(
-          {
-            stream: body.stream,
-            model: body.model,
-            toolResultCount: toolResults.length,
-            toolUseIds: toolResults
-              .map((t) => t.tool_use_id)
-              .filter((id): id is string => typeof id === 'string'),
-            lastUserBlockTypes: contentBlockTypes(lastUser.content),
-            messages: body.messages.map((m) => ({ role: m.role, types: contentBlockTypes(m.content) })),
-            session: {
-              hasConversationId: Boolean(session.conversationId),
-              hasAgentMessageId: Boolean(session.agentMessageId),
-              hasBridge: Boolean(session.mcp),
-              lastEventId: session.lastEventId,
-            },
-          },
-          'tool_result continuation received without stream=true',
-        )
-        throw new ProxyError(
-          'invalid_request_error',
-          'Tool-result continuation requires streaming.',
-          400,
-        )
-      }
+      // Tool-result turn: deliver the parked tool result(s) back to Dust, then resume
+      // the parked generation from where the previous turn ended — no new user
+      // message. Streaming *and* non-streaming resumes are supported: Claude Code
+      // retries a stalled resume with `stream: false`, which must not be rejected.
       if (!session.conversationId || !session.agentMessageId) {
         throw new ProxyError(
           'invalid_request_error',
@@ -564,26 +616,56 @@ export function buildMessagesHandler(ctx: ServerContext) {
       }
       for (const tr of toolResults) {
         if (!tr.tool_use_id) continue
-        const matched = bridge.resolveToolResult(
+        const outcome = await bridge.resolveToolResult(
           tr.tool_use_id,
           tr.content,
           tr.is_error === true,
         )
+        if (outcome.status === 'failed') {
+          throw new ProxyError(
+            'api_error',
+            `Failed to deliver tool result to Dust: ${outcome.error}`,
+            502,
+          )
+        }
+        // `unknown` (no parked call matches this id) means the history was replayed
+        // or a prior attempt already consumed the call; resume on a best-effort basis.
         request.log.debug(
-          { toolUseId: tr.tool_use_id, matched },
-          'tool_result received for parked Dust tool call',
+          { toolUseId: tr.tool_use_id, status: outcome.status },
+          'tool_result processed for parked Dust tool call',
         )
       }
-      await streamTurn(
-        ctx,
-        request,
-        reply,
-        body.model,
-        session.conversationId,
-        session.agentMessageId,
-        session,
-        session.lastEventId,
-      )
+      if (body.stream === true) {
+        await streamTurn(
+          ctx,
+          request,
+          reply,
+          body.model,
+          session.conversationId,
+          session.agentMessageId,
+          session,
+          session.lastEventId,
+        )
+      } else {
+        const result = await collectTurn(
+          ctx,
+          body.model,
+          session.conversationId,
+          session.agentMessageId,
+          session,
+          session.lastEventId,
+        )
+        reply.send({
+          id: result.id,
+          type: 'message',
+          role: 'assistant',
+          model: body.model,
+          content: result.content,
+          stop_reason: result.stopReason,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        })
+      }
       return
     }
 
