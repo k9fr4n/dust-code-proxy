@@ -40,7 +40,7 @@ export interface McpEndpoint {
 // The official doc says "no more than 5 minutes between two heartbeats"; the
 // reference client hits exactly that limit. We leave margin and send early.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 4 * 60 * 1000
-const DEFAULT_RECONNECT_DELAY_MS = 5 * 1000
+const DEFAULT_RECONNECT_DELAY_MS = 1 * 1000
 
 export interface DustMcpTransportOptions {
   endpoint: McpEndpoint

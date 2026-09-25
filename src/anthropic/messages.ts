@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import { FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { LOGIN_HINT } from '../dust/client.js'
+import { LOGIN_HINT, isTransientStreamError } from '../dust/client.js'
+import type { ParsedDustEvent } from '../dust/sse.js'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
 import { Session } from '../sessions.js'
@@ -56,6 +57,85 @@ function randomId(prefix: string): string {
 // within milliseconds; this lets every `tool_use` block reach Claude Code instead
 // of dropping all but the first.
 const TOOL_USE_FLUSH_DELAY_MS = 200
+
+// How many times a dropped message-event stream is resumed before the turn fails.
+// Each resume re-opens the SSE stream from the last seen event id, so events already
+// delivered to the client are never duplicated — it re-attaches where the stream died.
+const MAX_STREAM_RESUMES = 3
+const STREAM_RESUME_DELAY_MS = 500
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// The `done`/`unknown` variants of `ParsedDustEvent` are filtered out inside the
+// resilient wrapper, so its callers only ever see real message events.
+type DustMessageEvent = Extract<ParsedDustEvent, { kind: 'event' }>
+
+// Resilient wrapper around `DustClient.streamMessageEvents`. Dust (or a CDN in front
+// of it) intermittently drops SSE connections — either abruptly ("terminated: other
+// side closed") or as a premature clean EOF without the literal `data: done` sentinel.
+// The previous code treated both as fatal: an abrupt drop became a hard `error` event,
+// and a premature EOF looked like a completed turn (a truncated `message_stop`, with
+// no error ever reaching Claude Code). This wrapper instead re-opens the stream from
+// the last seen event id, and only surfaces an error after the resume budget is spent.
+async function* streamMessageEventsResilient(
+  ctx: ServerContext,
+  conversationId: string,
+  agentMessageId: string,
+  signal: AbortSignal | undefined,
+  initialCursor: string | undefined,
+  setCursor: (id: string) => void,
+  logger?: { warn?: (...args: unknown[]) => void },
+): AsyncGenerator<DustMessageEvent> {
+  let cursor = initialCursor
+  let resumes = 0
+  for (;;) {
+    let cleanEnd = false
+    let sawDone = false
+    try {
+      for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
+        lastEventId: cursor,
+        signal,
+      })) {
+        if (event.kind === 'done') {
+          sawDone = true
+          break
+        }
+        if (event.kind !== 'event') continue
+        if (event.eventId) {
+          cursor = event.eventId
+          setCursor(event.eventId)
+        }
+        yield event
+      }
+      cleanEnd = true
+    } catch (err) {
+      // A caller-driven abort (client disconnect, or the tool_use flush) is not a
+      // drop: re-throw so the caller can distinguish and act on it.
+      if (signal?.aborted) throw err
+      if (!isTransientStreamError(err)) throw err
+      cleanEnd = false
+    }
+
+    // A clean end only counts as "done" when Dust sent the `data: done` sentinel; a
+    // stream that simply EOFs early is the same symptom as a hard drop.
+    if (cleanEnd && sawDone) return
+    if (resumes >= MAX_STREAM_RESUMES) {
+      throw new ProxyError(
+        'api_error',
+        `Dust message stream dropped ${resumes + 1} times; giving up.`,
+        502,
+      )
+    }
+    resumes += 1
+    logger?.warn?.(
+      { conversationId, agentMessageId, cursor, resumes },
+      'Dust message stream dropped; resuming from last event id',
+    )
+    await sleep(STREAM_RESUME_DELAY_MS)
+  }
+}
 
 function extractText(content: string | ContentBlock[]): string {
   if (typeof content === 'string') return content
@@ -284,14 +364,17 @@ async function streamTurn(
   })
 
   try {
-    for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
-      lastEventId: resumeLastEventId,
-      signal: disconnect.signal,
-    })) {
-      if (event.kind === 'done') break
-      if (event.kind !== 'event') continue
-      if (event.eventId) session.lastEventId = event.eventId
-
+    for await (const event of streamMessageEventsResilient(
+      ctx,
+      conversationId,
+      agentMessageId,
+      disconnect.signal,
+      resumeLastEventId,
+      (id) => {
+        session.lastEventId = id
+      },
+      request.log,
+    )) {
       // A client-side MCP tool call first surfaces as a validation request. Approve
       // it so Dust dispatches `tools/call` to the bridge, which then emits `tool_use`.
       if (event.type === 'tool_approve_execution') {
@@ -329,6 +412,7 @@ async function streamTurn(
           request.log.warn({ err: cancelErr }, 'Failed to cancel Dust generation'),
         )
     } else {
+      request.log.error({ err }, 'Dust message stream failed')
       for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
         reply.raw.write(serializeSse(frame))
       }
@@ -386,12 +470,24 @@ async function handleNonStream(
   )
   const messageId = randomId('msg')
   const translator = new StreamTranslator(messageId, model)
-  for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId)) {
-    if (event.kind === 'done') break
-    if (event.kind !== 'event') continue
-    if (event.eventId) session.lastEventId = event.eventId
-    translator.translate(event.data)
-    if (isTerminalDustEvent(event.type)) break
+  try {
+    for await (const event of streamMessageEventsResilient(
+      ctx,
+      conversationId,
+      agentMessageId,
+      undefined,
+      undefined,
+      (id) => {
+        session.lastEventId = id
+      },
+      ctx.logger,
+    )) {
+      translator.translate(event.data)
+      if (isTerminalDustEvent(event.type)) break
+    }
+  } catch (err) {
+    ctx.logger?.error({ err }, 'Dust message stream failed')
+    throw err
   }
   if (!translator.isFinished()) translator.finishExternally()
   if (translator.errored) {
@@ -450,14 +546,17 @@ async function collectTurn(
   })
 
   try {
-    for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
-      lastEventId: resumeLastEventId,
-      signal: disconnect.signal,
-    })) {
-      if (event.kind === 'done') break
-      if (event.kind !== 'event') continue
-      if (event.eventId) session.lastEventId = event.eventId
-
+    for await (const event of streamMessageEventsResilient(
+      ctx,
+      conversationId,
+      agentMessageId,
+      disconnect.signal,
+      resumeLastEventId,
+      (id) => {
+        session.lastEventId = id
+      },
+      ctx.logger,
+    )) {
       if (event.type === 'tool_approve_execution') {
         const actionId = event.data.actionId
         const messageId = event.data.messageId
@@ -475,9 +574,9 @@ async function collectTurn(
   } catch (err) {
     if (toolUseEnded || disconnect.signal.aborted) {
       // Ended by tool_use (parked) or an external abort.
-    } else if (err instanceof ProxyError) {
-      throw err
     } else {
+      ctx.logger?.error({ err }, 'Dust message stream failed')
+      if (err instanceof ProxyError) throw err
       throw new ProxyError('api_error', (err as Error).message ?? 'Stream error', 502)
     }
   } finally {
