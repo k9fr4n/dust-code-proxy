@@ -233,13 +233,13 @@ describe('admin endpoints', () => {
     await app.close()
   })
 
-  it('serves the full catalog plus mapping keys on /v1/models', async () => {
+  it('serves the provider catalog on /v1/models', async () => {
     const app = buildServer(buildContext().ctx)
     const res = await app.inject({ method: 'GET', url: '/v1/models' })
     expect(res.statusCode).toBe(200)
     const ids = res.json().data.map((m: any) => m.id)
-    expect(ids).toContain('opus') // models.json mapping key
     expect(ids).toContain('claude-opus-5') // catalog model
+    expect(ids).not.toContain('opus') // models.json alias is not a catalog model
     const catalog = res.json().data.find((m: any) => m.id === 'claude-opus-5')
     expect(catalog.display_name).toBe('Claude Opus 5')
     await app.close()

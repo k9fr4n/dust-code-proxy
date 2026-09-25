@@ -235,7 +235,7 @@ Résolution d'un `model` : entrée de `models.json` → `DUST_DEFAULT_AGENT_CONF
 | `POST /v1/messages` | Traduction des messages (stream + non-stream). |
 | `GET /health` | État global + `dust_auth`. |
 | `GET /health/dust` | État d'authentification Dust (ttl du token, workspace). |
-| `GET /v1/models` | Liste de confort (mapping + agents découverts). |
+| `GET /v1/models` | Catalogue des LLM du workspace (comme `proxyctl models`), avec `display_name`. |
 | `POST /internal/sessions` | Créer/consulter une session (clé `session`). |
 | `DELETE /internal/sessions/:id` | Réinitialiser une session (mapping local uniquement). |
 | `GET /internal/status` | État détaillé proxy + Dust (`proxyctl status`). |

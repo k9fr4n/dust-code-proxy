@@ -85,24 +85,6 @@ export class ModelRouter {
     return [...ids]
   }
 
-  // Every identifier the proxy can route, with a best-effort display name. Serves
-  // GET /v1/models (Claude Code gateway discovery): the union of models.json keys,
-  // agent sIds, agent names and agent modelIds. `displayName` is the agent name for
-  // sIds/names; modelIds are left unnamed here and enriched from the Dust catalog
-  // by the caller.
-  routableModels(): { id: string; displayName?: string }[] {
-    const out = new Map<string, string | undefined>()
-    for (const model of Object.keys(this.mapping)) {
-      if (!out.has(model)) out.set(model, undefined)
-    }
-    for (const agent of this.agentsBySid.values()) {
-      if (!out.has(agent.sId)) out.set(agent.sId, agent.name)
-      if (!out.has(agent.name)) out.set(agent.name, agent.name)
-      if (agent.modelId && !out.has(agent.modelId)) out.set(agent.modelId, undefined)
-    }
-    return [...out].map(([id, displayName]) => ({ id, displayName }))
-  }
-
   // Claude Code model names that route to a given Dust agent. Used by
   // `proxyctl agents` to show the mapping next to each agent. A mapping whose
   // `configurationId` is a modelId (or a name) counts for every agent it resolves
