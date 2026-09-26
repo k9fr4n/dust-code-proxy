@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js'
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { CallToolResult, JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { Config } from '../config.js'
 import { DustMcpTransport, McpEndpoint } from '../dust/mcp.js'
 import {
@@ -40,6 +40,14 @@ interface PendingToolCall {
   }
 }
 
+// A tool call whose result was produced but never made it to Dust. The SDK handler
+// has already been settled (so the pending call is gone), yet Dust still waits for
+// the result: keep enough state to re-post it ourselves if Claude Code retries.
+interface FailedDelivery {
+  toolUseId: string
+  requestId: unknown
+}
+
 // Outcome of delivering a Claude Code tool_result back to Dust. The distinction
 // between `failed` (matched but Dust rejected it) and `unknown` (no parked call
 // matches this id — e.g. a replayed history) drives different error handling.
@@ -72,6 +80,13 @@ export class SessionMcp {
   // JSON-RPC request id → pending call, so the transport can report which tool
   // result was delivered once `send()` completes.
   private requestIdToPending = new Map<unknown, PendingToolCall>()
+  // Tool results whose delivery to Dust failed, kept so a Claude Code retry of the
+  // same `tool_result` can re-post them instead of being reported as `unknown`
+  // (which silently dropped the result and left the generation parked — issue #35).
+  private failedDeliveries = new Map<string, FailedDelivery>()
+  // JSON-RPC request id → delivery deferred, for results re-posted directly through
+  // the transport (the SDK handler is already settled, so there is no pending call).
+  private deliveryWaiters = new Map<unknown, PendingToolCall['delivered']>()
   private registeredTools = new Map<string, RegisteredTool>()
   private tools: AnthropicTool[] = []
   private activeEmitter: ToolUseEmitter | null = null
@@ -106,6 +121,12 @@ export class SessionMcp {
         this.serverId = serverId
       },
       onError: (err) => this.logger?.error?.(err),
+      // Recovered automatically by the transport's reconnect: `warn`, not `error`.
+      onStreamDrop: (err) =>
+        this.logger?.warn?.(
+          { err: err.message },
+          'Dust MCP requests stream dropped; reconnecting',
+        ),
       onMessageDelivered: (messageId, ok, error) =>
         this.handleMessageDelivered(messageId, ok, error),
     })
@@ -143,7 +164,13 @@ export class SessionMcp {
     isError: boolean,
   ): Promise<ToolResultDelivery> {
     const pending = this.pending.get(toolUseId)
-    if (!pending) return { status: 'unknown' }
+    if (!pending) {
+      // No parked call — but if a previous attempt's delivery failed, Dust is still
+      // waiting for this result: re-post it instead of reporting `unknown`.
+      const failed = this.failedDeliveries.get(toolUseId)
+      if (failed) return this.redeliverToolResult(failed, content, isError)
+      return { status: 'unknown' }
+    }
     // Settle the SDK handler so it returns the result and `transport.send()` posts
     // it to Dust; the transport then reports delivery via `handleMessageDelivered`.
     pending.resolve({ text: toolResultToText(content), isError })
@@ -170,7 +197,61 @@ export class SessionMcp {
 
     this.pending.delete(toolUseId)
     if (pending.requestId != null) this.requestIdToPending.delete(pending.requestId)
+    // Remember hard failures so a retry can re-deliver; the SDK handler is settled,
+    // so the pending call itself can never be reused.
+    if (delivery.status === 'failed' && pending.requestId != null) {
+      this.failedDeliveries.set(toolUseId, { toolUseId, requestId: pending.requestId })
+      this.logger?.warn?.(
+        { toolUseId, requestId: pending.requestId, error: delivery.error },
+        'Tool result delivery failed; kept for re-delivery on retry',
+      )
+    }
     return delivery
+  }
+
+  // Re-post a previously failed tool result straight through the transport. The MCP
+  // SDK cannot help here (its handler already returned), so we rebuild the exact
+  // JSON-RPC response it would have sent for that request id. The content comes from
+  // the *current* retry, which is what Claude Code considers authoritative.
+  private async redeliverToolResult(
+    failed: FailedDelivery,
+    content: unknown,
+    isError: boolean,
+  ): Promise<ToolResultDelivery> {
+    if (!this.transport || this.closed) {
+      return { status: 'failed', error: 'MCP bridge closed; cannot re-deliver tool result.' }
+    }
+    const waiter = deferred()
+    this.deliveryWaiters.set(failed.requestId, waiter)
+    const message = {
+      jsonrpc: '2.0',
+      id: failed.requestId,
+      result: {
+        content: [{ type: 'text', text: toolResultToText(content) }],
+        isError,
+      },
+    } as unknown as JSONRPCMessage
+    this.logger?.warn?.(
+      { toolUseId: failed.toolUseId, requestId: failed.requestId },
+      're-delivering a previously failed tool result to Dust',
+    )
+    try {
+      await this.transport.send(message)
+      const delivery = await withTimeout(
+        waiter.promise,
+        this.config.timeouts.createMessageMs * 5,
+      ).then(
+        () => ({ status: 'delivered' as const }),
+        (err: unknown) => ({
+          status: 'failed' as const,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+      if (delivery.status === 'delivered') this.failedDeliveries.delete(failed.toolUseId)
+      return delivery
+    } finally {
+      this.deliveryWaiters.delete(failed.requestId)
+    }
   }
 
   async close(): Promise<void> {
@@ -182,8 +263,13 @@ export class SessionMcp {
       p.reject(err)
       p.delivered.reject(err)
     }
+    for (const waiter of this.deliveryWaiters.values()) {
+      waiter.reject(new Error('MCP bridge closed'))
+    }
     this.pending.clear()
     this.requestIdToPending.clear()
+    this.deliveryWaiters.clear()
+    this.failedDeliveries.clear()
     if (this.transport) {
       await this.transport.close().catch(() => {})
     }
@@ -263,6 +349,12 @@ export class SessionMcp {
   }
 
   private handleMessageDelivered(messageId: unknown, ok: boolean, error?: Error): void {
+    const waiter = this.deliveryWaiters.get(messageId)
+    if (waiter) {
+      if (ok) waiter.resolve()
+      else waiter.reject(error ?? new Error('Tool result re-delivery failed'))
+      return
+    }
     const pending = this.requestIdToPending.get(messageId)
     if (!pending) return
     if (ok) pending.delivered.resolve()

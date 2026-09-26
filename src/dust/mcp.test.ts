@@ -193,3 +193,56 @@ describe('DustMcpTransport', () => {
     expect(ep.postMcpResult).not.toHaveBeenCalled()
   })
 })
+
+// Issue #35 §5: Dust closes the `mcp/requests` stream roughly every 150 s. The
+// transport reconnects on its own, so those drops must be reported as recoverable
+// drops (logged `warn`) instead of transport errors (logged `error`).
+describe('DustMcpTransport recoverable stream drops', () => {
+  it('reports a transient drop through onStreamDrop, not onError', async () => {
+    let calls = 0
+    const stream = vi.fn(async function* () {
+      calls += 1
+      if (calls === 1) throw new Error('terminated: other side closed')
+      await new Promise<void>(() => {})
+    })
+    const onError = vi.fn()
+    const onStreamDrop = vi.fn()
+    const transport = new DustMcpTransport({
+      endpoint: endpoint({ streamMcpRequests: stream }),
+      serverName: 'test-server',
+      reconnectDelayMs: 10,
+      onError,
+      onStreamDrop,
+    })
+
+    await transport.start()
+    await vi.waitFor(() => expect(stream).toHaveBeenCalledTimes(2))
+    expect(onStreamDrop).toHaveBeenCalledTimes(1)
+    expect(onError).not.toHaveBeenCalled()
+    await transport.close()
+  })
+
+  it('still reports a non-transient stream failure as an error', async () => {
+    let calls = 0
+    const stream = vi.fn(async function* () {
+      calls += 1
+      if (calls === 1) throw new Error('Dust MCP stream failed (500): nope')
+      await new Promise<void>(() => {})
+    })
+    const onError = vi.fn()
+    const onStreamDrop = vi.fn()
+    const transport = new DustMcpTransport({
+      endpoint: endpoint({ streamMcpRequests: stream }),
+      serverName: 'test-server',
+      reconnectDelayMs: 10,
+      onError,
+      onStreamDrop,
+    })
+
+    await transport.start()
+    await vi.waitFor(() => expect(stream).toHaveBeenCalledTimes(2))
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onStreamDrop).not.toHaveBeenCalled()
+    await transport.close()
+  })
+})

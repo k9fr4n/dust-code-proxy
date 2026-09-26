@@ -17,6 +17,7 @@ import { CREDITS_PATH, CreditsInfo, parseCredits } from './credits.js'
 import { MODELS_PATH, ModelCatalog, parseModelCatalog } from './catalog.js'
 import { AGENTS_PATH, AgentList, parseAgentList } from './agents.js'
 import { ParsedDustEvent, ParsedMcpRequest, streamSse, streamMcpRequests } from './sse.js'
+import { IDLE_STREAM_ERROR_MARKER } from './stream-errors.js'
 import {
   registerMcpResponseSchema,
   heartbeatMcpResponseSchema,
@@ -43,21 +44,13 @@ function isRetryableDustStatus(status: number): boolean {
   return status === 429 || status >= 500
 }
 
-// Network-level stream failures that are safe to recover from by re-opening the SSE
-// stream from the last event id: the upstream (or a CDN in front of it) dropped the
-// connection. Caller-driven aborts (AbortError) are cancellation, never a drop. Our
-// own idle timeout is also recoverable this way — the generation simply went quiet.
-export function isTransientStreamError(err: unknown): boolean {
-  const name = (err as { name?: string } | null)?.name
-  if (name === 'AbortError') return false
-  if (err instanceof ProxyError) {
-    return err.message.includes('No Dust event received')
-  }
-  const msg = err instanceof Error ? err.message : String(err)
-  return /terminated|other side closed|fetch failed|network error|socket closed|connection reset|ETIMEDOUT|ECONNRESET|ECONNREFUSED/.test(
-    msg,
-  )
-}
+// Stream-failure classification lives in `stream-errors.ts` (shared with the MCP
+// transport); re-exported here because callers import it from the client.
+export {
+  IDLE_STREAM_ERROR_MARKER,
+  isIdleStreamTimeout,
+  isTransientStreamError,
+} from './stream-errors.js'
 
 export interface PostMessageInput {
   content: string
@@ -563,7 +556,7 @@ export class DustClient {
       if (idleElapsed && !opts?.signal?.aborted) {
         throw new ProxyError(
           'api_error',
-          `No Dust event received for ${idleMs}ms; stream aborted.`,
+          `${IDLE_STREAM_ERROR_MARKER} for ${idleMs}ms; stream aborted.`,
           504,
         )
       }
@@ -684,16 +677,27 @@ export class DustClient {
   // here would otherwise park the agent forever (the error is swallowed upstream),
   // so retry transient failures before giving up. 4xx (expired/invalid serverId) is
   // not retried: it needs a re-registration, not a replay.
+  //
+  // The retry is NOT idempotent: `mcp/results` takes no idempotency key, so if Dust
+  // applied a result and only the response was lost, the replay re-applies the same
+  // `tool_result`. That trade-off is deliberate (a parked generation is worse than a
+  // duplicate result), but every replay is logged with the JSON-RPC id so a double
+  // application can be traced back from the logs instead of being invisible.
   async postMcpResult(
     serverId: string,
     result: unknown,
   ): Promise<{ success: boolean }> {
     const ws = this.workspaceId()
     const attempts = MCP_RESULT_MAX_ATTEMPTS
+    const resultId = (result as { id?: unknown } | null)?.id
     let lastErr: Error | null = null
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) {
+        this.logger?.warn?.(
+          { serverId, resultId, attempt: attempt + 1, of: attempts, err: lastErr?.message },
+          'Replaying POST mcp/results (not idempotent: Dust may already have applied it)',
+        )
         await new Promise((r) => setTimeout(r, MCP_RESULT_RETRY_DELAYS_MS[attempt - 1] ?? 1500))
       }
       let res: Response

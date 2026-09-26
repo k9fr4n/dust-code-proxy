@@ -2,6 +2,7 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { z } from 'zod'
 import { ParsedMcpRequest } from './sse.js'
+import { isTransientStreamError } from './stream-errors.js'
 
 // Client-side MCP bridge — faithful port of `DustMcpServerTransport` from the
 // official `@dust-tt/client` SDK (src/mcp_transport.ts), adapted to this repo's
@@ -51,6 +52,11 @@ export interface DustMcpTransportOptions {
   // The SDK's `McpServer.connect()` takes ownership of `Transport.onerror`, so this
   // separate callback is how the caller observes internal transport errors.
   onError?: (error: Error) => void
+  // Fired instead of `onError` when the requests stream is dropped by the upstream
+  // (or a CDN) and will be reconnected automatically. Dust closes this stream every
+  // ~150 s, so reporting each drop as an error drowns the logs in noise for an event
+  // the transport recovers from on its own (issue #35).
+  onStreamDrop?: (error: Error) => void
   // Fired after `send()` finishes posting a JSON-RPC message to Dust, keyed by the
   // message's JSON-RPC `id`. Lets the caller await (and react to) tool-result
   // delivery instead of leaving a parked generation to time out silently.
@@ -200,7 +206,14 @@ export class DustMcpTransport implements Transport {
         if (!this.closed && !controller.signal.aborted) this.scheduleReconnect()
       } catch (err) {
         if (this.closed || controller.signal.aborted) return
-        this.reportError(err instanceof Error ? err : new Error(String(err)))
+        const e = err instanceof Error ? err : new Error(String(err))
+        // A transient drop is recovered by the reconnect below: surface it as a
+        // recoverable drop, not as a transport error.
+        if (isTransientStreamError(e) && this.options.onStreamDrop) {
+          this.options.onStreamDrop(e)
+        } else {
+          this.reportError(e)
+        }
         this.scheduleReconnect()
       }
     })()
