@@ -40,6 +40,7 @@ interface Fake {
 function buildContext(
   state: MessageState | null | (MessageState | null)[],
   streamError?: unknown,
+  streamEvents?: { type: string; data: Record<string, unknown> }[],
 ): { ctx: ServerContext; fake: Fake } {
   const fake: Fake = {
     states: Array.isArray(state) ? state : [state],
@@ -52,6 +53,7 @@ function buildContext(
       return true
     },
     workspaceId: () => 'w-123',
+    postMessage: async () => ({ agentMessageId: AGENT_MESSAGE, userMessageId: 'umsg_1' }),
     getAgentMessageState: async (conversationId: string, agentMessageId: string) => {
       fake.stateCalls += 1
       expect(conversationId).toBe(CONVERSATION)
@@ -66,6 +68,13 @@ function buildContext(
       fake.streamCalls += 1
       return (async function* () {
         if (streamError) throw streamError
+        for (const event of streamEvents ?? []) {
+          yield { kind: 'event' as const, eventId: 'e1', type: event.type, data: event.data }
+        }
+        if (streamEvents) {
+          yield { kind: 'done' as const }
+          return
+        }
         await new Promise<void>(() => {})
       })()
     },
@@ -100,6 +109,15 @@ function buildContext(
       sessions,
     },
     fake,
+  }
+}
+
+function plainRequest(stream: boolean): Record<string, unknown> {
+  return {
+    model: 'claude-sonnet-4-5',
+    stream,
+    max_tokens: 256,
+    messages: [{ role: 'user', content: 'review PR 10' }],
   }
 }
 
@@ -262,5 +280,58 @@ describe('idle timeout on a resume whose message finished meanwhile', () => {
     const res = await post(ctx, toolResultRequest(false))
     expect(res.statusCode).toBe(504)
     expect(res.payload).toContain(IDLE_STREAM_ERROR_MARKER)
+  })
+})
+
+// Production case (conversation aKd4Fheaab, message ND6VkQn1C2): the Dust agent ran
+// its client-side tools, the last tool result was itself an error (Claude Code's
+// permission classifier timing out), and the agent ended its turn with an empty
+// `content`. Claude Code then received only the generic note and stopped, with no
+// trace of what the agent had done.
+describe('a turn that Dust ends with no visible answer', () => {
+  const emptySuccess = [
+    { type: 'agent_message_success', data: { type: 'agent_message_success', message: { content: '' } } },
+  ]
+
+  it('uses the agent reasoning instead of the generic note (streaming)', async () => {
+    const { ctx, fake } = buildContext(
+      { status: 'succeeded', content: '', chainOfThought: 'I fetched PR 10 with the gh CLI.' },
+      undefined,
+      emptySuccess,
+    )
+    const res = await post(ctx, plainRequest(true))
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toContain('I fetched PR 10 with the gh CLI.')
+    expect(res.payload).not.toContain(NO_VISIBLE_ANSWER_TEXT)
+    expect(res.payload).toContain('message_stop')
+    expect(fake.stateCalls).toBe(1)
+  })
+
+  it('uses the agent reasoning instead of the generic note (non-streaming)', async () => {
+    const { ctx } = buildContext(
+      { status: 'succeeded', content: '', chainOfThought: 'I fetched PR 10 with the gh CLI.' },
+      undefined,
+      emptySuccess,
+    )
+    const res = await post(ctx, plainRequest(false))
+    const json = JSON.parse(res.payload)
+    expect(json.content).toEqual([{ type: 'text', text: 'I fetched PR 10 with the gh CLI.' }])
+    expect(json.stop_reason).toBe('end_turn')
+  })
+
+  it('keeps the generic note when the agent left no reasoning either', async () => {
+    const { ctx } = buildContext({ status: 'succeeded', content: '' }, undefined, emptySuccess)
+    const res = await post(ctx, plainRequest(false))
+    expect(JSON.parse(res.payload).content[0].text).toBe(NO_VISIBLE_ANSWER_TEXT)
+  })
+
+  it('does not read the stored message when the turn has a visible answer', async () => {
+    const { ctx, fake } = buildContext({ status: 'succeeded', content: 'Here you go.' }, undefined, [
+      { type: 'agent_message_success', data: { type: 'agent_message_success', message: { content: 'Here you go.' } } },
+    ])
+    const res = await post(ctx, plainRequest(false))
+    expect(JSON.parse(res.payload).content).toEqual([{ type: 'text', text: 'Here you go.' }])
+    // No extra round-trip on the happy path.
+    expect(fake.stateCalls).toBe(0)
   })
 })
