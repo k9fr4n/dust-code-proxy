@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { FastifyBaseLogger, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { LOGIN_HINT, isIdleStreamTimeout, isTransientStreamError } from '../dust/client.js'
-import type { ParsedDustEvent } from '../dust/sse.js'
+import type { DustStreamEvent, ParsedDustEvent } from '../dust/sse.js'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
 import { Session } from '../sessions.js'
@@ -353,6 +353,36 @@ async function finishedAgentMessage(
   return { text, failed: state.status === 'failed', error: state.error }
 }
 
+// Dust sometimes ends a turn with an empty `content`: typically when the agent stops
+// right after its client-side tool calls (observed in production when a tool result
+// was itself an error, e.g. Claude Code's own permission classifier timing out).
+// Emitting only the generic "no visible answer" note is then a dead end: Claude Code
+// ends the task and the user sees nothing of what the agent actually did. Replace
+// such a terminal event with the agent's own reasoning, read back from the stored
+// message, so the turn stays informative and actionable.
+async function terminalEventWithVisibleAnswer(
+  ctx: ServerContext,
+  event: { type: string; data: Record<string, unknown> },
+  translator: StreamTranslator,
+  conversationId: string,
+  agentMessageId: string,
+  logger?: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+): Promise<DustStreamEvent> {
+  const data = event.data as DustStreamEvent
+  if (!isTerminalDustEvent(event.type)) return data
+  if (translator.text || translator.toolUses.length > 0) return data
+  const streamed = (event.data as { message?: { content?: unknown } }).message?.content
+  if (typeof streamed === 'string' && streamed.trim()) return data
+
+  const finished = await finishedAgentMessage(ctx, conversationId, agentMessageId, logger)
+  if (!finished || finished.failed || finished.text === NO_VISIBLE_ANSWER_TEXT) return data
+  logger?.info?.(
+    { conversationId, agentMessageId, visibleChars: finished.text.length },
+    'Dust turn ended with no visible answer; using the stored message instead',
+  )
+  return { ...data, type: 'agent_message_success', message: { content: finished.text } }
+}
+
 // Start (or re-declare) the session's MCP bridge and return the live serverId, if
 // any, to pass as `clientSideMCPServerIds` on the posted message.
 async function ensureMcpBridge(
@@ -462,7 +492,16 @@ async function streamTurn(
         continue
       }
 
-      const frames = translator.translate(event.data)
+      const frames = translator.translate(
+        await terminalEventWithVisibleAnswer(
+          ctx,
+          event,
+          translator,
+          conversationId,
+          agentMessageId,
+          request.log,
+        ),
+      )
       for (const frame of frames) reply.raw.write(serializeSse(frame))
       if (translator.isFinished()) break
       if (isTerminalDustEvent(event.type)) break
@@ -576,7 +615,16 @@ async function handleNonStream(
       },
       ctx.logger,
     )) {
-      translator.translate(event.data)
+      translator.translate(
+        await terminalEventWithVisibleAnswer(
+          ctx,
+          event,
+          translator,
+          conversationId,
+          agentMessageId,
+          ctx.logger,
+        ),
+      )
       if (isTerminalDustEvent(event.type)) break
     }
   } catch (err) {
@@ -660,7 +708,16 @@ async function collectTurn(
         continue
       }
 
-      translator.translate(event.data)
+      translator.translate(
+        await terminalEventWithVisibleAnswer(
+          ctx,
+          event,
+          translator,
+          conversationId,
+          agentMessageId,
+          ctx.logger,
+        ),
+      )
       if (translator.isFinished()) break
       if (isTerminalDustEvent(event.type)) break
     }
