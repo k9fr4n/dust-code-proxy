@@ -22,6 +22,14 @@ export interface Config {
   dustSpaceId: string | undefined
   dustDefaultAgentConfigurationId: string | undefined
   dustForwardSystem: boolean
+  // How client-side tool executions are validated on Dust. Dust parks the
+  // generation on a `tool_approve_execution` event until someone answers, and the
+  // proxy can only answer while it is reading the message-events stream. Answering
+  // `always_approved` makes Dust remember the choice and stop asking, which is what
+  // the Dust CLI's `--auto` achieves interactively; `approved` answers one call at
+  // a time (Dust keeps asking). Claude Code runs its own permission system on top,
+  // so `always_approved` is the default.
+  dustToolApproval: 'always_approved' | 'approved'
   modelsFile: string
   mcpServerName: string
   mcpHeartbeatIntervalMs: number
@@ -68,6 +76,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dustSpaceId: env.DUST_SPACE_ID || undefined,
     dustDefaultAgentConfigurationId:
       env.DUST_DEFAULT_AGENT_CONFIGURATION_ID || undefined,
+    dustToolApproval:
+      env.DUST_TOOL_APPROVAL === 'approved' ? 'approved' : 'always_approved',
     dustForwardSystem: boolValue(env.DUST_FORWARD_SYSTEM, true),
     modelsFile: env.MODELS_FILE ?? './models.json',
     mcpServerName: env.DUST_MCP_SERVER_NAME ?? 'claude-code-proxy',
