@@ -478,17 +478,10 @@ async function streamTurn(
       },
       request.log,
     )) {
-      // A client-side MCP tool call first surfaces as a validation request. Approve
-      // it so Dust dispatches `tools/call` to the bridge, which then emits `tool_use`.
+      // Approving lets Dust dispatch `tools/call` to the bridge, which then emits
+      // `tool_use` to Claude Code.
       if (event.type === 'tool_approve_execution') {
-        const actionId = event.data.actionId
-        const messageId = event.data.messageId
-        if (typeof actionId === 'string' && typeof messageId === 'string') {
-          await ctx.dust.validateAction(conversationId, messageId, actionId, 'approved')
-          request.log.info({ actionId }, 'Approved client-side MCP tool execution')
-        } else {
-          request.log.warn({ event: event.data }, 'tool_approve_execution missing ids')
-        }
+        await approveToolExecution(ctx, conversationId, event.data, request.log)
         continue
       }
 
@@ -585,6 +578,12 @@ async function handleStream(
   await streamTurn(ctx, request, reply, model, conversationId, agentMessageId, session)
 }
 
+// Non-streaming counterpart of `handleStream`. It reuses `collectTurn`, so a
+// non-streaming turn behaves exactly like a streaming one: client-side tools are
+// declared to Dust, validation requests are approved, and a tool call is returned
+// as a `tool_use` block. Before that it had its own simplified loop which declared
+// no tools and ignored validations, so any non-streaming request carrying tools
+// either lost them or hung until the idle timeout.
 async function handleNonStream(
   ctx: ServerContext,
   reply: FastifyReply,
@@ -593,56 +592,25 @@ async function handleNonStream(
   content: string,
   title: string,
   session: Session,
+  tools: AnthropicTool[],
 ): Promise<void> {
+  const serverIds = await ensureMcpBridge(ctx, session, tools)
   const { conversationId, agentMessageId } = await prepareMessage(
     ctx,
     session,
     configurationId,
     content,
     title,
+    serverIds,
   )
-  const messageId = randomId('msg')
-  const translator = new StreamTranslator(messageId, model)
-  try {
-    for await (const event of streamMessageEventsResilient(
-      ctx,
-      conversationId,
-      agentMessageId,
-      undefined,
-      undefined,
-      (id) => {
-        session.lastEventId = id
-      },
-      ctx.logger,
-    )) {
-      translator.translate(
-        await terminalEventWithVisibleAnswer(
-          ctx,
-          event,
-          translator,
-          conversationId,
-          agentMessageId,
-          ctx.logger,
-        ),
-      )
-      if (isTerminalDustEvent(event.type)) break
-    }
-  } catch (err) {
-    ctx.logger?.error({ err }, 'Dust message stream failed')
-    throw err
-  }
-  if (!translator.isFinished()) translator.finishExternally()
-  if (translator.errored) {
-    throw new ProxyError('api_error', translator.errorMessage, 502)
-  }
-
+  const result = await collectTurn(ctx, model, conversationId, agentMessageId, session)
   reply.send({
-    id: messageId,
+    id: result.id,
     type: 'message',
     role: 'assistant',
     model,
-    content: [{ type: 'text', text: translator.text || NO_VISIBLE_ANSWER_TEXT }],
-    stop_reason: translator.stopReason ?? 'end_turn',
+    content: result.content,
+    stop_reason: result.stopReason,
     stop_sequence: null,
     usage: { input_tokens: 0, output_tokens: 0 },
   })
@@ -700,11 +668,7 @@ async function collectTurn(
       ctx.logger,
     )) {
       if (event.type === 'tool_approve_execution') {
-        const actionId = event.data.actionId
-        const messageId = event.data.messageId
-        if (typeof actionId === 'string' && typeof messageId === 'string') {
-          await ctx.dust.validateAction(conversationId, messageId, actionId, 'approved')
-        }
+        await approveToolExecution(ctx, conversationId, event.data, ctx.logger)
         continue
       }
 
@@ -767,6 +731,29 @@ async function collectTurn(
   // "[Your previous response had no visible output...]".
   if (content.length === 0) content.push({ type: 'text', text: NO_VISIBLE_ANSWER_TEXT })
   return { id: messageId, content, stopReason: translator.stopReason ?? 'end_turn' }
+}
+
+// A client-side MCP tool call first surfaces as a validation request, and Dust parks
+// the generation until it is answered. The proxy can only answer while it is reading
+// the message-events stream, so a validation emitted with nobody listening strands
+// the generation (Dust then shows "Allow <agent> to use <server>?" and waits).
+// Answering `always_approved` makes Dust remember the choice and stop asking for
+// that tool, which is why it is the default (see `config.dustToolApproval`).
+async function approveToolExecution(
+  ctx: ServerContext,
+  conversationId: string,
+  data: Record<string, unknown>,
+  logger?: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+): Promise<void> {
+  const actionId = data.actionId
+  const messageId = data.messageId
+  if (typeof actionId !== 'string' || typeof messageId !== 'string') {
+    logger?.warn?.({ event: data }, 'tool_approve_execution missing ids')
+    return
+  }
+  const approval = ctx.config.dustToolApproval
+  await ctx.dust.validateAction(conversationId, messageId, actionId, approval)
+  logger?.info?.({ actionId, approval }, 'Approved client-side MCP tool execution')
 }
 
 // Send a complete assistant turn made of a single text block, streamed or not.
@@ -1043,8 +1030,8 @@ export function buildMessagesHandler(ctx: ServerContext) {
     const title = userText.slice(0, 80) || 'Claude Code request'
     const stream = body.stream === true
 
+    const tools = parseTools(body.tools)
     if (stream) {
-      const tools = parseTools(body.tools)
       await handleStream(
         ctx,
         request,
@@ -1057,7 +1044,16 @@ export function buildMessagesHandler(ctx: ServerContext) {
         tools,
       )
     } else {
-      await handleNonStream(ctx, reply, body.model, configurationId, content, title, session)
+      await handleNonStream(
+        ctx,
+        reply,
+        body.model,
+        configurationId,
+        content,
+        title,
+        session,
+        tools,
+      )
     }
   }
 }
