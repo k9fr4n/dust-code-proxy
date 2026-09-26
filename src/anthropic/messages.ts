@@ -64,6 +64,13 @@ const TOOL_USE_FLUSH_DELAY_MS = 200
 const MAX_STREAM_RESUMES = 3
 const STREAM_RESUME_DELAY_MS = 500
 
+// A resume that yields no new event means we re-attached to a stream that has
+// nothing left to say (stalled or already-finished generation). Retrying that is
+// pointless: it only burns another `idleStreamMs` before failing (issue #35). One
+// is tolerated because a genuine drop can happen again immediately after
+// reconnecting, before any event had a chance to arrive.
+const MAX_NO_PROGRESS_STREAM_RESUMES = 1
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -79,7 +86,18 @@ type DustMessageEvent = Extract<ParsedDustEvent, { kind: 'event' }>
 // and a premature EOF looked like a completed turn (a truncated `message_stop`, with
 // no error ever reaching Claude Code). This wrapper instead re-opens the stream from
 // the last seen event id, and only surfaces an error after the resume budget is spent.
-async function* streamMessageEventsResilient(
+//
+// It resumes *connection* failures only. A stalled generation (our `idleStreamMs`
+// timeout, no event at all for 120 s) is deliberately NOT resumed: the socket is
+// healthy, so re-subscribing from the same cursor just re-arms the same timeout and
+// the turn hangs for `resumes × idleStreamMs` with no terminal frame (issue #35).
+// Such a timeout is re-thrown as-is (504) so the caller fails fast.
+//
+// Resuming relies on Dust's `lastEventId` being exclusive (the stream restarts
+// *strictly after* the cursor). Verified live against the Dust API; the
+// `event.eventId === resumedFrom` guard below keeps the wrapper duplicate-free even
+// if that semantics ever changes.
+export async function* streamMessageEventsResilient(
   ctx: ServerContext,
   conversationId: string,
   agentMessageId: string,
@@ -90,9 +108,12 @@ async function* streamMessageEventsResilient(
 ): AsyncGenerator<DustMessageEvent> {
   let cursor = initialCursor
   let resumes = 0
+  let noProgressResumes = 0
   for (;;) {
     let cleanEnd = false
     let sawDone = false
+    const resumedFrom = cursor
+    let progressed = false
     try {
       for await (const event of ctx.dust.streamMessageEvents(conversationId, agentMessageId, {
         lastEventId: cursor,
@@ -103,10 +124,14 @@ async function* streamMessageEventsResilient(
           break
         }
         if (event.kind !== 'event') continue
+        // Defensive against an inclusive `lastEventId`: never re-deliver the event
+        // we resumed from (it already reached the client).
+        if (event.eventId && resumedFrom && event.eventId === resumedFrom) continue
         if (event.eventId) {
           cursor = event.eventId
           setCursor(event.eventId)
         }
+        progressed = true
         yield event
       }
       cleanEnd = true
@@ -114,6 +139,7 @@ async function* streamMessageEventsResilient(
       // A caller-driven abort (client disconnect, or the tool_use flush) is not a
       // drop: re-throw so the caller can distinguish and act on it.
       if (signal?.aborted) throw err
+      // A stalled generation (idle timeout) must fail fast, not be resumed.
       if (!isTransientStreamError(err)) throw err
       cleanEnd = false
     }
@@ -121,6 +147,19 @@ async function* streamMessageEventsResilient(
     // A clean end only counts as "done" when Dust sent the `data: done` sentinel; a
     // stream that simply EOFs early is the same symptom as a hard drop.
     if (cleanEnd && sawDone) return
+    if (progressed) {
+      noProgressResumes = 0
+    } else {
+      noProgressResumes += 1
+      if (noProgressResumes > MAX_NO_PROGRESS_STREAM_RESUMES) {
+        throw new ProxyError(
+          'api_error',
+          `Dust message stream produced no new event after ${noProgressResumes} ` +
+            `resumes from ${cursor ?? 'the start'}; giving up.`,
+          504,
+        )
+      }
+    }
     if (resumes >= MAX_STREAM_RESUMES) {
       throw new ProxyError(
         'api_error',
@@ -130,7 +169,7 @@ async function* streamMessageEventsResilient(
     }
     resumes += 1
     logger?.warn?.(
-      { conversationId, agentMessageId, cursor, resumes },
+      { conversationId, agentMessageId, cursor, resumes, progressed },
       'Dust message stream dropped; resuming from last event id',
     )
     await sleep(STREAM_RESUME_DELAY_MS)
