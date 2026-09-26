@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { DustStreamEvent } from '../dust/sse.js'
-import { StreamTranslator, isTerminalDustEvent } from './stream.js'
+import { StreamTranslator, isTerminalDustEvent , NO_VISIBLE_ANSWER_TEXT } from './stream.js'
 
 function event(type: string, extra: Record<string, unknown> = {}): DustStreamEvent {
   return { type, ...extra }
@@ -27,14 +27,21 @@ describe('StreamTranslator', () => {
     expect(translator.stopReason).toBe('end_turn')
   })
 
-  it('emits a message even when no tokens arrive (empty response)', () => {
+  it('emits a visible placeholder when no tokens arrive (empty response)', () => {
+    // A turn with no content block at all makes Claude Code inject "[Your previous
+    // response had no visible output...]" and retry, which loops. Dust stores an
+    // empty `content` whenever the agent ends its turn right after its tool calls.
     const translator = new StreamTranslator('msg_1', 'model')
     const events = translator.translate(event('agent_message_success'))
     expect(events.map((e) => e.type)).toEqual([
       'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
       'message_delta',
       'message_stop',
     ])
+    expect(translator.text).toBe(NO_VISIBLE_ANSWER_TEXT)
   })
 
   it('skips chain_of_thought and only emits tokens as text', () => {

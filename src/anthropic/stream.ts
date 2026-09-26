@@ -50,6 +50,11 @@ function extractTextContent(value: unknown): string | undefined {
   return undefined
 }
 
+// Shown when a Dust turn completes without any visible answer (see
+// `StreamTranslator.ensureVisibleText`).
+export const NO_VISIBLE_ANSWER_TEXT =
+  '(The Dust agent completed this turn without producing a visible answer.)'
+
 export class StreamTranslator {
   text = ''
   stopReason: string | null = null
@@ -99,11 +104,15 @@ export class StreamTranslator {
             out.push(...this.onText(full.slice(this.text.length)))
           }
         }
+        out.push(...this.ensureVisibleText())
         out.push(...this.finish('end_turn'))
         return out
       }
-      case 'agent_generation_cancelled':
-        return this.finish('end_turn')
+      case 'agent_generation_cancelled': {
+        const out = this.ensureVisibleText()
+        out.push(...this.finish('end_turn'))
+        return out
+      }
       case 'agent_error':
       case 'user_message_error':
         return this.onError(event)
@@ -114,6 +123,17 @@ export class StreamTranslator {
 
   isFinished(): boolean {
     return this.finished
+  }
+
+  // Claude Code requires every assistant turn to carry visible content: a turn with
+  // none makes it inject "[Your previous response had no visible output. Please
+  // continue and produce a user-visible response.]" and retry. A Dust agent that
+  // ends its turn right after its tool calls stores an empty `content`, so emit an
+  // explicit note instead of nothing. Must be called *before* `finish()`: once the
+  // turn is closed no content block can be added.
+  ensureVisibleText(text = NO_VISIBLE_ANSWER_TEXT): AnthropicStreamEvent[] {
+    if (this.finished || this.text || this.toolUses.length > 0) return []
+    return this.onText(text)
   }
 
   finishExternally(stopReason = 'end_turn'): AnthropicStreamEvent[] {
