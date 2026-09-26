@@ -25,6 +25,21 @@ export interface DustMessageInfo {
   status?: string
 }
 
+// Persisted state of a Dust agent message, read back from the conversation. Used
+// to settle a turn whose message-events stream has nothing left to say (a
+// generation that already completed while the proxy was not subscribed).
+export interface DustAgentMessageState {
+  sId: string
+  status?: string
+  // The agent's visible answer. Empty when the agent ended its turn on tool calls
+  // without producing any final text.
+  content?: string
+  // The agent's reasoning. Used as a last-resort visible text, because Claude Code
+  // rejects an assistant turn with no content at all.
+  chainOfThought?: string
+  error?: string
+}
+
 export interface DustWorkspaceInfo {
   sId: string
   name: string
@@ -125,6 +140,46 @@ export function findAgentMessageId(
     if (match) return match.sId
   }
   return agents[agents.length - 1]?.sId
+}
+
+// Locate one agent message by sId in a conversation payload and read the fields
+// needed to rebuild a finished turn. Walks defensively: the conversation shape
+// (`content: Message[][]`) is not part of the documented API contract.
+export function findAgentMessageState(
+  payload: unknown,
+  agentMessageId: string,
+): DustAgentMessageState | undefined {
+  const seen = new Set<unknown>()
+  let found: DustAgentMessageState | undefined
+
+  const walk = (node: unknown): void => {
+    if (found || !node || typeof node !== 'object' || seen.has(node)) return
+    seen.add(node)
+    const obj = node as Record<string, any>
+    if (obj.sId === agentMessageId && typeof obj.type === 'string' && AGENT_TYPES.has(obj.type)) {
+      found = {
+        sId: agentMessageId,
+        status: typeof obj.status === 'string' ? obj.status : undefined,
+        content: typeof obj.content === 'string' ? obj.content : undefined,
+        chainOfThought: typeof obj.chainOfThought === 'string' ? obj.chainOfThought : undefined,
+        error:
+          typeof obj.error === 'string'
+            ? obj.error
+            : typeof obj.error?.message === 'string'
+              ? obj.error.message
+              : undefined,
+      }
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item)
+      return
+    }
+    for (const value of Object.values(obj)) walk(value)
+  }
+
+  walk(payload)
+  return found
 }
 
 export function findConversationId(payload: unknown): string | undefined {

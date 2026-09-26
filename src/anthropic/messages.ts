@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { FastifyReply, FastifyRequest } from 'fastify'
+import { FastifyBaseLogger, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { LOGIN_HINT, isTransientStreamError } from '../dust/client.js'
+import { LOGIN_HINT, isIdleStreamTimeout, isTransientStreamError } from '../dust/client.js'
 import type { ParsedDustEvent } from '../dust/sse.js'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
@@ -11,6 +11,7 @@ import {
   StreamTranslator,
   serializeSse,
   isTerminalDustEvent,
+  NO_VISIBLE_ANSWER_TEXT,
 } from './stream.js'
 import { AnthropicTool } from './tools.js'
 
@@ -63,6 +64,12 @@ const TOOL_USE_FLUSH_DELAY_MS = 200
 // delivered to the client are never duplicated — it re-attaches where the stream died.
 const MAX_STREAM_RESUMES = 3
 const STREAM_RESUME_DELAY_MS = 500
+
+// Dust agent-message statuses that mean "this generation will never emit another
+// event". Resuming the message-events stream of such a message is a dead end: the
+// stream stays open and silent (Dust sends no `done` sentinel on a resume), so the
+// turn can only burn `idleStreamMs` and fail.
+const FINISHED_AGENT_MESSAGE_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
 // A resume that yields no new event means we re-attached to a stream that has
 // nothing left to say (stalled or already-finished generation). Retrying that is
@@ -319,6 +326,33 @@ async function prepareMessage(
   return { conversationId, agentMessageId }
 }
 
+// Settle a turn from the *persisted* Dust message instead of its event stream.
+// Returns `undefined` when the generation is still running (the caller must then
+// stream normally) or when the lookup fails, so this can never make things worse
+// than the stream-based path.
+async function finishedAgentMessage(
+  ctx: ServerContext,
+  conversationId: string,
+  agentMessageId: string,
+  logger?: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+): Promise<{ text: string; failed: boolean; error?: string } | undefined> {
+  let state
+  try {
+    state = await ctx.dust.getAgentMessageState(conversationId, agentMessageId)
+  } catch (err) {
+    logger?.warn?.({ err, conversationId, agentMessageId }, 'Could not read the Dust message state')
+    return undefined
+  }
+  if (!state?.status || !FINISHED_AGENT_MESSAGE_STATUSES.has(state.status)) return undefined
+
+  const text = state.content?.trim() || state.chainOfThought?.trim() || NO_VISIBLE_ANSWER_TEXT
+  logger?.info?.(
+    { conversationId, agentMessageId, status: state.status, visibleChars: text.length },
+    'Dust generation already finished; settling the turn from the stored message',
+  )
+  return { text, failed: state.status === 'failed', error: state.error }
+}
+
 // Start (or re-declare) the session's MCP bridge and return the live serverId, if
 // any, to pass as `clientSideMCPServerIds` on the posted message.
 async function ensureMcpBridge(
@@ -434,6 +468,9 @@ async function streamTurn(
       if (isTerminalDustEvent(event.type)) break
     }
     if (!translator.isFinished()) {
+      for (const frame of translator.ensureVisibleText()) {
+        reply.raw.write(serializeSse(frame))
+      }
       for (const frame of translator.finishExternally()) {
         reply.raw.write(serializeSse(frame))
       }
@@ -451,9 +488,27 @@ async function streamTurn(
           request.log.warn({ err: cancelErr }, 'Failed to cancel Dust generation'),
         )
     } else {
-      request.log.error({ err }, 'Dust message stream failed')
-      for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
-        reply.raw.write(serializeSse(frame))
+      // The stream went silent. If Dust has meanwhile finished the message (it can
+      // complete between the pre-check and the resume), settle the turn from the
+      // stored message rather than pushing an error frame to Claude Code.
+      const finished = isIdleStreamTimeout(err)
+        ? await finishedAgentMessage(ctx, conversationId, agentMessageId, request.log)
+        : undefined
+      if (finished && !finished.failed) {
+        session.lastEventId = undefined
+        const frames =
+          translator.text || translator.toolUses.length > 0
+            ? translator.finishExternally()
+            : translator.translate({
+                type: 'agent_message_success',
+                message: { content: finished.text },
+              })
+        for (const frame of frames) reply.raw.write(serializeSse(frame))
+      } else {
+        request.log.error({ err }, 'Dust message stream failed')
+        for (const frame of translator.error((err as Error).message ?? 'Stream error')) {
+          reply.raw.write(serializeSse(frame))
+        }
       }
     }
   } finally {
@@ -538,7 +593,7 @@ async function handleNonStream(
     type: 'message',
     role: 'assistant',
     model,
-    content: translator.text ? [{ type: 'text', text: translator.text }] : [],
+    content: [{ type: 'text', text: translator.text || NO_VISIBLE_ANSWER_TEXT }],
     stop_reason: translator.stopReason ?? 'end_turn',
     stop_sequence: null,
     usage: { input_tokens: 0, output_tokens: 0 },
@@ -609,14 +664,33 @@ async function collectTurn(
       if (translator.isFinished()) break
       if (isTerminalDustEvent(event.type)) break
     }
-    if (!translator.isFinished()) translator.finishExternally()
+    if (!translator.isFinished()) {
+      translator.ensureVisibleText()
+      translator.finishExternally()
+    }
   } catch (err) {
     if (toolUseEnded || disconnect.signal.aborted) {
       // Ended by tool_use (parked) or an external abort.
     } else {
-      ctx.logger?.error({ err }, 'Dust message stream failed')
-      if (err instanceof ProxyError) throw err
-      throw new ProxyError('api_error', (err as Error).message ?? 'Stream error', 502)
+      // Same recovery as `streamTurn`: a silent stream on an already-finished Dust
+      // message is answered from the stored message, not with an error.
+      const finished = isIdleStreamTimeout(err)
+        ? await finishedAgentMessage(ctx, conversationId, agentMessageId, ctx.logger)
+        : undefined
+      if (finished && !finished.failed) {
+        session.lastEventId = undefined
+        if (!translator.text && translator.toolUses.length === 0) {
+          return {
+            id: messageId,
+            content: [{ type: 'text', text: finished.text }],
+            stopReason: 'end_turn',
+          }
+        }
+      } else {
+        ctx.logger?.error({ err }, 'Dust message stream failed')
+        if (err instanceof ProxyError) throw err
+        throw new ProxyError('api_error', (err as Error).message ?? 'Stream error', 502)
+      }
     }
   } finally {
     if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
@@ -632,7 +706,49 @@ async function collectTurn(
   for (const toolUse of translator.toolUses) {
     content.push({ type: 'tool_use', id: toolUse.id, name: toolUse.name, input: toolUse.input })
   }
+  // An assistant turn with no content block at all makes Claude Code retry with
+  // "[Your previous response had no visible output...]".
+  if (content.length === 0) content.push({ type: 'text', text: NO_VISIBLE_ANSWER_TEXT })
   return { id: messageId, content, stopReason: translator.stopReason ?? 'end_turn' }
+}
+
+// Send a complete assistant turn made of a single text block, streamed or not.
+// Used to settle a turn from a Dust message that has already finished.
+function replyWithText(
+  reply: FastifyReply,
+  model: string,
+  text: string,
+  stream: boolean,
+): void {
+  const messageId = randomId('msg')
+  if (!stream) {
+    reply.send({
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [{ type: 'text', text }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    })
+    return
+  }
+  reply.hijack()
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  const translator = new StreamTranslator(messageId, model)
+  for (const frame of translator.translate({
+    type: 'agent_message_success',
+    message: { content: text },
+  })) {
+    reply.raw.write(serializeSse(frame))
+  }
+  reply.raw.end()
 }
 
 // Answer Claude Code's hidden "name this session" request without a Dust round-trip.
@@ -773,6 +889,32 @@ export function buildMessagesHandler(ctx: ServerContext) {
           'tool_result processed for parked Dust tool call',
         )
       }
+      // The parked generation may already be over: Dust completes the message on
+      // its own (a tool result delivered late, a cancellation, an agent that ended
+      // its turn right after the tool call). Its events stream would then stay open
+      // and silent until `idleStreamMs`, and Claude Code would retry the same dead
+      // resume forever. Ask Dust for the message state first and, when it is
+      // finished, answer from the stored message instead of streaming.
+      const finished = await finishedAgentMessage(
+        ctx,
+        session.conversationId,
+        session.agentMessageId,
+        request.log,
+      )
+      if (finished) {
+        // The turn is over: the next tool_result must not resume this message.
+        session.lastEventId = undefined
+        if (finished.failed) {
+          throw new ProxyError(
+            'api_error',
+            finished.error ?? 'The Dust agent message failed.',
+            502,
+          )
+        }
+        replyWithText(reply, body.model, finished.text, body.stream === true)
+        return
+      }
+
       if (body.stream === true) {
         await streamTurn(
           ctx,

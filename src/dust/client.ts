@@ -11,6 +11,8 @@ import {
   findConversationId,
   findUserMessageId,
   findAgentMessageId,
+  findAgentMessageState,
+  DustAgentMessageState,
   findSid,
 } from './parse.js'
 import { CREDITS_PATH, CreditsInfo, parseCredits } from './credits.js'
@@ -423,6 +425,18 @@ export class DustClient {
     const json = await res.json().catch(() => null)
     if (!res.ok) throw this.mapDustError(res.status, json)
     return json
+  }
+
+  // Read back the persisted state of one agent message. This is the authoritative
+  // answer to "is this generation still running?", which the message-events stream
+  // cannot give: a stream re-opened after the generation ended stays open and
+  // silent (no `done` sentinel), so waiting on it can only time out.
+  async getAgentMessageState(
+    conversationId: string,
+    agentMessageId: string,
+  ): Promise<DustAgentMessageState | undefined> {
+    const conversation = await this.getConversation(conversationId)
+    return findAgentMessageState(conversation, agentMessageId)
   }
 
   private parseConversationResult(json: unknown): ConversationResult {
