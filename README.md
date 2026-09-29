@@ -14,7 +14,7 @@ ce proxy.
 
 ```bash
 cp .env.example .env          # puis ajuster PROXY_API_KEYS au minimum
-docker compose up -d --build
+docker compose up -d
 docker compose exec proxy proxyctl login
 # → ouvre l'URL affichée dans ton navigateur, saisis le code, sélectionne le workspace
 ```

@@ -1,6 +1,7 @@
 services:
   proxy:
-    build: .
+    image: ghcr.io/k9fr4n/dust-code-proxy:latest
+    pull_policy: always
     ports:
       - "8080:8080"
     volumes:
