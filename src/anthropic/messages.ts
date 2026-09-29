@@ -276,9 +276,19 @@ function getApiKey(request: FastifyRequest): string | undefined {
   return undefined
 }
 
-function resolveSessionKey(request: FastifyRequest, body: MessagesRequest): string {
+export function resolveSessionKey(request: FastifyRequest, body: MessagesRequest): string {
   const header = request.headers['x-dust-session']
   if (typeof header === 'string' && header.trim()) return header.trim()
+
+  // OpenCode 2 sends the OpenCode session id on every Anthropic request, but it
+  // does not send our proxy-specific x-dust-session header. Use it before the API
+  // key fallback, otherwise every OpenCode conversation is folded into one Dust
+  // conversation.
+  const openCodeSession = request.headers['x-opencode-session']
+  if (typeof openCodeSession === 'string' && openCodeSession.trim()) {
+    return `opencode:${openCodeSession.trim()}`
+  }
+
   const userId = body.metadata?.user_id
   if (typeof userId === 'string' && userId.trim()) return `meta:${userId}`
   const apiKey = getApiKey(request)
@@ -443,9 +453,12 @@ async function streamTurn(
   const onClose = () => disconnect.abort()
   // The request `close` event fires as soon as the body is consumed (before any
   // streaming), which aborts the turn immediately on the tool-result resume. The
-  // socket `close` fires only on a real TCP disconnect.
+  // socket `close` fires only on a real TCP disconnect, while `aborted` catches an
+  // HTTP client cancelling one request on a keep-alive connection. OpenCode can
+  // abandon a turn without closing the underlying socket.
   const socket = request.raw.socket
   socket.on('close', onClose)
+  request.raw.on('aborted', onClose)
 
   const translator = new StreamTranslator(messageId, model)
   const bridge = session.mcp as SessionMcp | undefined
@@ -560,6 +573,7 @@ async function streamTurn(
     if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
     bridge?.setEmitter(null)
     socket.off('close', onClose)
+    request.raw.off('aborted', onClose)
     if (interrupted) {
       request.raw.destroy()
     } else {
@@ -599,6 +613,7 @@ async function handleStream(
 // either lost them or hung until the idle timeout.
 async function handleNonStream(
   ctx: ServerContext,
+  request: FastifyRequest,
   reply: FastifyReply,
   model: string,
   configurationId: string,
@@ -616,7 +631,7 @@ async function handleNonStream(
     title,
     serverIds,
   )
-  const result = await collectTurn(ctx, model, conversationId, agentMessageId, session)
+  const result = await collectTurn(ctx, request, model, conversationId, agentMessageId, session)
   reply.send({
     id: result.id,
     type: 'message',
@@ -635,6 +650,7 @@ async function handleNonStream(
 // continuation with `stream: false` when retrying after a stalled streaming resume.
 async function collectTurn(
   ctx: ServerContext,
+  request: FastifyRequest | undefined,
   model: string,
   conversationId: string,
   agentMessageId: string,
@@ -653,6 +669,8 @@ async function collectTurn(
   const translator = new StreamTranslator(messageId, model)
   const bridge = session.mcp as SessionMcp | undefined
   const disconnect = new AbortController()
+  const onRequestAborted = () => disconnect.abort()
+  request?.raw.on('aborted', onRequestAborted)
   let toolUseEnded = false
 
   let toolUseFlushTimer: NodeJS.Timeout | null = null
@@ -711,8 +729,17 @@ async function collectTurn(
       translator.finishExternally()
     }
   } catch (err) {
-    if (toolUseEnded || disconnect.signal.aborted) {
-      // Ended by tool_use (parked) or an external abort.
+    if (toolUseEnded) {
+      // Ended by tool_use (parked). The generation must remain alive for the
+      // following tool_result request.
+    } else if (disconnect.signal.aborted) {
+      // The non-streaming client abandoned the HTTP request. Stop the Dust
+      // generation instead of letting it continue after OpenCode has stopped.
+      await ctx.dust
+        .cancel(conversationId, agentMessageId)
+        .catch((cancelErr) =>
+          ctx.logger?.warn?.({ err: cancelErr }, 'Failed to cancel Dust generation'),
+        )
     } else {
       // Same recovery as `streamTurn`: a silent stream on an already-finished Dust
       // message is answered from the stored message, not with an error.
@@ -737,6 +764,7 @@ async function collectTurn(
   } finally {
     if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
     bridge?.setEmitter(null)
+    request?.raw.off('aborted', onRequestAborted)
   }
 
   if (translator.errored) {
@@ -994,6 +1022,7 @@ export function buildMessagesHandler(ctx: ServerContext) {
       } else {
         const result = await collectTurn(
           ctx,
+          request,
           body.model,
           session.conversationId,
           session.agentMessageId,
@@ -1067,6 +1096,7 @@ export function buildMessagesHandler(ctx: ServerContext) {
     } else {
       await handleNonStream(
         ctx,
+        request,
         reply,
         body.model,
         configurationId,
