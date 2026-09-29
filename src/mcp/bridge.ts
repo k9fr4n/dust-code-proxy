@@ -158,6 +158,18 @@ export class SessionMcp {
   setEmitter(emitter: ToolUseEmitter | null): void {
     this.activeEmitter = emitter
     if (!emitter) return
+    this.flushPending()
+  }
+
+  // Detach a reply's emitter, but only if it is still the active one. A turn that
+  // ends must not unhook the emitter of another turn that attached after it: doing
+  // so left the live turn with "no active reply" and its tool calls expiring.
+  releaseEmitter(emitter: ToolUseEmitter): void {
+    if (this.activeEmitter !== emitter) return
+    this.activeEmitter = null
+  }
+
+  private flushPending(): void {
     for (const pending of [...this.pending.values()]) {
       if (pending.emitted) continue
       if (!this.activeEmitter) break

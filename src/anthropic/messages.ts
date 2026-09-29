@@ -5,7 +5,7 @@ import { LOGIN_HINT, isIdleStreamTimeout, isTransientStreamError } from '../dust
 import type { DustStreamEvent, ParsedDustEvent } from '../dust/sse.js'
 import { ServerContext } from '../context.js'
 import { ProxyError } from '../errors.js'
-import { Session } from '../sessions.js'
+import { Session, acquireSessionTurn } from '../sessions.js'
 import { SessionMcp } from '../mcp/bridge.js'
 import {
   StreamTranslator,
@@ -197,12 +197,26 @@ function extractText(content: string | ContentBlock[]): string {
     .join('\n\n')
 }
 
-// Claude Code sends a hidden "name this session" request before the first real
-// turn. It carries a distinctive system prompt; detect it so it can be answered
+// Hidden "name this thread" requests that coding harnesses fire around the first
+// real turn. Each carries a distinctive system prompt; detect it so it is answered
 // locally instead of creating a Dust conversation and burning an agent turn.
-function isNamingRequest(body: MessagesRequest): boolean {
+//
+// Claude Code sends its one *before* the first turn, which was harmless to miss.
+// OpenCode 2 sends its title call on the SAME `x-opencode-session` as the real turn
+// and within a few milliseconds of it, so letting it through opened a second Dust
+// conversation with the same title and stole the real turn's agent message and MCP
+// emitter — the turn then ended with no visible answer.
+const TITLE_REQUEST_MARKERS = [
+  // Claude Code
+  'naming a coding session',
+  // OpenCode 2 (`session.title` prompt)
+  'You are a title generator',
+]
+
+export function isNamingRequest(body: MessagesRequest): boolean {
   if (!body.system) return false
-  return extractText(body.system).includes('naming a coding session')
+  const system = extractText(body.system)
+  return TITLE_REQUEST_MARKERS.some((marker) => system.includes(marker))
 }
 
 // Derive a session title from the naming request's content, which wraps the
@@ -211,7 +225,9 @@ function isNamingRequest(body: MessagesRequest): boolean {
 function sessionTitleFrom(content: string): string {
   const match = content.match(/<session>([\s\S]*?)<\/session>/)
   const source = match ? match[1] : content
-  const cleaned = source.replace(/\s+/g, ' ').trim()
+  // OpenCode wraps the user message in double quotes; drop them so the title does
+  // not read as `"do the thing"`.
+  const cleaned = source.replace(/\s+/g, ' ').trim().replace(/^"([\s\S]*)"$/, '$1').trim()
   return cleaned.slice(0, 80) || 'Claude Code session'
 }
 
@@ -480,8 +496,10 @@ async function streamTurn(
     disconnect.abort()
   }
 
-  bridge?.setEmitter({
-    emitToolUse(toolUseId, name, input) {
+  // Kept in a const so the `finally` releases *this* turn's emitter and never one
+  // that a later turn attached in the meantime.
+  const emitter = {
+    emitToolUse(toolUseId: string, name: string, input: unknown) {
       for (const frame of translator.emitToolUseBlock(toolUseId, name, input)) {
         reply.raw.write(serializeSse(frame))
       }
@@ -490,7 +508,8 @@ async function streamTurn(
       if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
       toolUseFlushTimer = setTimeout(flushToolUse, TOOL_USE_FLUSH_DELAY_MS)
     },
-  })
+  }
+  bridge?.setEmitter(emitter)
 
   try {
     for await (const event of streamMessageEventsResilient(
@@ -571,7 +590,7 @@ async function streamTurn(
     }
   } finally {
     if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
-    bridge?.setEmitter(null)
+    bridge?.releaseEmitter(emitter)
     socket.off('close', onClose)
     request.raw.off('aborted', onClose)
     if (interrupted) {
@@ -686,13 +705,14 @@ async function collectTurn(
     disconnect.abort()
   }
 
-  bridge?.setEmitter({
-    emitToolUse(toolUseId, name, input) {
+  const emitter = {
+    emitToolUse(toolUseId: string, name: string, input: unknown) {
       translator.emitToolUseBlock(toolUseId, name, input)
       if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
       toolUseFlushTimer = setTimeout(flushToolUse, TOOL_USE_FLUSH_DELAY_MS)
     },
-  })
+  }
+  bridge?.setEmitter(emitter)
 
   try {
     for await (const event of streamMessageEventsResilient(
@@ -763,7 +783,7 @@ async function collectTurn(
     }
   } finally {
     if (toolUseFlushTimer) clearTimeout(toolUseFlushTimer)
-    bridge?.setEmitter(null)
+    bridge?.releaseEmitter(emitter)
     request?.raw.off('aborted', onRequestAborted)
   }
 
@@ -939,172 +959,183 @@ export function buildMessagesHandler(ctx: ServerContext) {
     }
     ctx.sessions.touch(session)
 
-    const toolResults = extractToolResults(lastUser.content)
+    // A session owns exactly one Dust conversation and one in-flight agent
+    // message, so its turns must not overlap. Harnesses do fire concurrent
+    // requests on a single session id (OpenCode sends its title call alongside
+    // the real turn); without this queue they both created a conversation —
+    // leaving an orphan with the same title — and the first to finish tore down
+    // the MCP emitter of the one still streaming.
+    const releaseTurn = await acquireSessionTurn(session)
+    try {
+      const toolResults = extractToolResults(lastUser.content)
 
-    if (toolResults.length > 0) {
-      // Tool-result turn: deliver the parked tool result(s) back to Dust, then resume
-      // the parked generation from where the previous turn ended — no new user
-      // message. Streaming *and* non-streaming resumes are supported: Claude Code
-      // retries a stalled resume with `stream: false`, which must not be rejected.
-      if (!session.conversationId || !session.agentMessageId) {
-        throw new ProxyError(
-          'invalid_request_error',
-          'Tool result received without an active Dust conversation.',
-          400,
-        )
-      }
-      const bridge = session.mcp as SessionMcp | undefined
-      if (!bridge) {
-        throw new ProxyError(
-          'invalid_request_error',
-          'Tool result received without an active tool bridge.',
-          400,
-        )
-      }
-      for (const tr of toolResults) {
-        if (!tr.tool_use_id) continue
-        const outcome = await bridge.resolveToolResult(
-          tr.tool_use_id,
-          tr.content,
-          tr.is_error === true,
-        )
-        if (outcome.status === 'failed') {
+      if (toolResults.length > 0) {
+        // Tool-result turn: deliver the parked tool result(s) back to Dust, then resume
+        // the parked generation from where the previous turn ended — no new user
+        // message. Streaming *and* non-streaming resumes are supported: Claude Code
+        // retries a stalled resume with `stream: false`, which must not be rejected.
+        if (!session.conversationId || !session.agentMessageId) {
           throw new ProxyError(
-            'api_error',
-            `Failed to deliver tool result to Dust: ${outcome.error}`,
-            502,
+            'invalid_request_error',
+            'Tool result received without an active Dust conversation.',
+            400,
           )
         }
-        // `unknown` (no parked call matches this id) means the history was replayed
-        // or a prior attempt already consumed the call; resume on a best-effort basis.
-        request.log.debug(
-          { toolUseId: tr.tool_use_id, status: outcome.status },
-          'tool_result processed for parked Dust tool call',
-        )
-      }
-      // The parked generation may already be over: Dust completes the message on
-      // its own (a tool result delivered late, a cancellation, an agent that ended
-      // its turn right after the tool call). Its events stream would then stay open
-      // and silent until `idleStreamMs`, and Claude Code would retry the same dead
-      // resume forever. Ask Dust for the message state first and, when it is
-      // finished, answer from the stored message instead of streaming.
-      const finished = await finishedAgentMessage(
-        ctx,
-        session.conversationId,
-        session.agentMessageId,
-        request.log,
-      )
-      if (finished) {
-        // The turn is over: the next tool_result must not resume this message.
-        session.lastEventId = undefined
-        if (finished.failed) {
+        const bridge = session.mcp as SessionMcp | undefined
+        if (!bridge) {
           throw new ProxyError(
-            'api_error',
-            finished.error ?? 'The Dust agent message failed.',
-            502,
+            'invalid_request_error',
+            'Tool result received without an active tool bridge.',
+            400,
           )
         }
-        replyWithText(reply, body.model, finished.text, body.stream === true)
+        for (const tr of toolResults) {
+          if (!tr.tool_use_id) continue
+          const outcome = await bridge.resolveToolResult(
+            tr.tool_use_id,
+            tr.content,
+            tr.is_error === true,
+          )
+          if (outcome.status === 'failed') {
+            throw new ProxyError(
+              'api_error',
+              `Failed to deliver tool result to Dust: ${outcome.error}`,
+              502,
+            )
+          }
+          // `unknown` (no parked call matches this id) means the history was replayed
+          // or a prior attempt already consumed the call; resume on a best-effort basis.
+          request.log.debug(
+            { toolUseId: tr.tool_use_id, status: outcome.status },
+            'tool_result processed for parked Dust tool call',
+          )
+        }
+        // The parked generation may already be over: Dust completes the message on
+        // its own (a tool result delivered late, a cancellation, an agent that ended
+        // its turn right after the tool call). Its events stream would then stay open
+        // and silent until `idleStreamMs`, and Claude Code would retry the same dead
+        // resume forever. Ask Dust for the message state first and, when it is
+        // finished, answer from the stored message instead of streaming.
+        const finished = await finishedAgentMessage(
+          ctx,
+          session.conversationId,
+          session.agentMessageId,
+          request.log,
+        )
+        if (finished) {
+          // The turn is over: the next tool_result must not resume this message.
+          session.lastEventId = undefined
+          if (finished.failed) {
+            throw new ProxyError(
+              'api_error',
+              finished.error ?? 'The Dust agent message failed.',
+              502,
+            )
+          }
+          replyWithText(reply, body.model, finished.text, body.stream === true)
+          return
+        }
+
+        if (body.stream === true) {
+          await streamTurn(
+            ctx,
+            request,
+            reply,
+            body.model,
+            session.conversationId,
+            session.agentMessageId,
+            session,
+            session.lastEventId,
+          )
+        } else {
+          const result = await collectTurn(
+            ctx,
+            request,
+            body.model,
+            session.conversationId,
+            session.agentMessageId,
+            session,
+            session.lastEventId,
+          )
+          reply.send({
+            id: result.id,
+            type: 'message',
+            role: 'assistant',
+            model: body.model,
+            content: result.content,
+            stop_reason: result.stopReason,
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          })
+        }
         return
       }
 
-      if (body.stream === true) {
-        await streamTurn(
+      if (hasUnsupportedBlocks(lastUser.content)) {
+        throw new ProxyError(
+          'invalid_request_error',
+          'This MVP only supports text blocks. Tool use, images and documents are not supported yet.',
+          400,
+        )
+      }
+      const userText = extractText(lastUser.content)
+      if (!userText.trim()) {
+        throw new ProxyError('invalid_request_error', 'Empty user message.', 400)
+      }
+
+      let content = userText
+      if (ctx.config.dustForwardSystem) {
+        // Merge the top-level `system` field and any inline `system` messages so the
+        // system reminders Claude Code sends as messages are not silently dropped.
+        // The `system` field is the large, static Claude Code prompt, and Claude Code
+        // re-sends it verbatim on every turn — forwarding it each time duplicates the
+        // whole prompt on every Dust user message. Send it only when the conversation
+        // is first created; the per-turn inline `system` messages (git status,
+        // environment, …) are still forwarded below.
+        const systemParts: string[] = []
+        if (body.system && !session.conversationId) systemParts.push(extractText(body.system))
+        for (const m of body.messages) {
+          if (m.role === 'system') {
+            const text = extractText(m.content)
+            if (text.trim()) systemParts.push(text)
+          }
+        }
+        if (systemParts.length > 0) {
+          content = `[System instructions]\n${systemParts.join('\n\n')}\n\n[Claude Code request]\n${userText}`
+        }
+      }
+
+      const title = userText.slice(0, 80) || 'Claude Code request'
+      const stream = body.stream === true
+
+      const tools = parseTools(body.tools)
+      if (stream) {
+        await handleStream(
           ctx,
           request,
           reply,
           body.model,
-          session.conversationId,
-          session.agentMessageId,
+          configurationId,
+          content,
+          title,
           session,
-          session.lastEventId,
+          tools,
         )
       } else {
-        const result = await collectTurn(
+        await handleNonStream(
           ctx,
           request,
+          reply,
           body.model,
-          session.conversationId,
-          session.agentMessageId,
+          configurationId,
+          content,
+          title,
           session,
-          session.lastEventId,
+          tools,
         )
-        reply.send({
-          id: result.id,
-          type: 'message',
-          role: 'assistant',
-          model: body.model,
-          content: result.content,
-          stop_reason: result.stopReason,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        })
       }
-      return
-    }
-
-    if (hasUnsupportedBlocks(lastUser.content)) {
-      throw new ProxyError(
-        'invalid_request_error',
-        'This MVP only supports text blocks. Tool use, images and documents are not supported yet.',
-        400,
-      )
-    }
-    const userText = extractText(lastUser.content)
-    if (!userText.trim()) {
-      throw new ProxyError('invalid_request_error', 'Empty user message.', 400)
-    }
-
-    let content = userText
-    if (ctx.config.dustForwardSystem) {
-      // Merge the top-level `system` field and any inline `system` messages so the
-      // system reminders Claude Code sends as messages are not silently dropped.
-      // The `system` field is the large, static Claude Code prompt, and Claude Code
-      // re-sends it verbatim on every turn — forwarding it each time duplicates the
-      // whole prompt on every Dust user message. Send it only when the conversation
-      // is first created; the per-turn inline `system` messages (git status,
-      // environment, …) are still forwarded below.
-      const systemParts: string[] = []
-      if (body.system && !session.conversationId) systemParts.push(extractText(body.system))
-      for (const m of body.messages) {
-        if (m.role === 'system') {
-          const text = extractText(m.content)
-          if (text.trim()) systemParts.push(text)
-        }
-      }
-      if (systemParts.length > 0) {
-        content = `[System instructions]\n${systemParts.join('\n\n')}\n\n[Claude Code request]\n${userText}`
-      }
-    }
-
-    const title = userText.slice(0, 80) || 'Claude Code request'
-    const stream = body.stream === true
-
-    const tools = parseTools(body.tools)
-    if (stream) {
-      await handleStream(
-        ctx,
-        request,
-        reply,
-        body.model,
-        configurationId,
-        content,
-        title,
-        session,
-        tools,
-      )
-    } else {
-      await handleNonStream(
-        ctx,
-        request,
-        reply,
-        body.model,
-        configurationId,
-        content,
-        title,
-        session,
-        tools,
-      )
+    } finally {
+      releaseTurn()
     }
   }
 }

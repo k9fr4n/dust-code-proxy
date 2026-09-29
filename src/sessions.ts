@@ -27,6 +27,40 @@ export interface Session {
   lastEventId?: string
   mcp?: SessionMcpBridge
   lastActivityAt: number
+  // Tail of the per-session turn queue. A session maps to ONE Dust conversation and
+  // ONE in-flight agent message, so two turns must never run concurrently on it:
+  // they would both create a conversation (leaving an orphan with the same title)
+  // and clobber each other's `agentMessageId` and MCP emitter. Clients do fire
+  // concurrent requests on a single session (OpenCode sends its title-generator
+  // call at the same instant as the real turn), so requests are serialized here.
+  turnLock?: Promise<void>
+}
+
+// Run `fn` with exclusive access to `session`, queued behind any turn already in
+// flight for it. The queue never breaks on a failed turn: a rejection releases the
+// lock like a success.
+export async function acquireSessionTurn(session: Session): Promise<() => void> {
+  const previous = session.turnLock
+  let release!: () => void
+  session.turnLock = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  if (previous) await previous.catch(() => {})
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    release()
+  }
+}
+
+export async function withSessionLock<T>(session: Session, fn: () => Promise<T>): Promise<T> {
+  const release = await acquireSessionTurn(session)
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
 }
 
 const IDLE_TTL_MS = 24 * 60 * 60 * 1000

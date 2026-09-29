@@ -98,6 +98,7 @@ function buildContext(
       return { status: 'unknown' as const }
     },
     setEmitter: () => {},
+    releaseEmitter: () => {},
     close: async () => {},
   } as unknown as typeof session.mcp
 

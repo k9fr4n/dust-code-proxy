@@ -120,6 +120,31 @@ describe('SessionMcp late tool_use emission', () => {
     await bridge.close()
   })
 
+  // Two turns of the same session used to overlap (OpenCode fires its title call
+  // alongside the real turn). The short one finishing ran `setEmitter(null)` and
+  // unhooked the live turn, whose tool calls then expired as "no active reply".
+  it('keeps the live emitter when an older turn releases its own', async () => {
+    const bridge = new SessionMcp(makeEndpoint(), config())
+    await bridge.start([ECHO])
+
+    const stale: Emitted[] = []
+    const staleEmitter = collector(stale)
+    bridge.setEmitter(staleEmitter)
+
+    const live: Emitted[] = []
+    bridge.setEmitter(collector(live))
+
+    // The older turn ends after the live one attached: it must not detach anything.
+    bridge.releaseEmitter(staleEmitter)
+
+    call(bridge, 1, 'still-routed')
+    await vi.waitFor(() => expect(live).toHaveLength(1))
+    expect(live[0]).toMatchObject({ input: { text: 'still-routed' } })
+    expect(stale).toHaveLength(0)
+
+    await bridge.close()
+  })
+
   it('does not report a tool_use as emitted when it was only queued', async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const bridge = new SessionMcp(makeEndpoint(), config(), logger)
