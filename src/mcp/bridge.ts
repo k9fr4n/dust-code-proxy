@@ -163,6 +163,7 @@ export class SessionMcp {
     content: unknown,
     isError: boolean,
   ): Promise<ToolResultDelivery> {
+    this.logger?.info?.({ tool_use_id: toolUseId }, '[TOOL] Claude tool_result received')
     const pending = this.pending.get(toolUseId)
     if (!pending) {
       // No parked call — but if a previous attempt's delivery failed, Dust is still
@@ -313,6 +314,10 @@ export class SessionMcp {
     requestId?: unknown,
   ): Promise<CallToolResult> {
     const toolUseId = `toolu_${randomBytes(16).toString('hex')}`
+    this.logger?.info?.(
+      { mcp_request_id: requestId, tool: name, arguments: input },
+      '[TOOL] MCP request',
+    )
     // Normalize the model's arguments against the declared schema before emitting
     // the `tool_use`: a non-string `command` (object/number/array) otherwise reaches
     // Claude Code, whose local validation rejects it as "command expected string".
@@ -341,6 +346,10 @@ export class SessionMcp {
     // tool locally and returns a tool_result in its next request, which
     // `resolveToolResult` uses to settle this promise.
     this.activeEmitter?.emitToolUse(toolUseId, name, sanitized)
+    this.logger?.info?.(
+      { tool_use_id: toolUseId, mcp_request_id: requestId },
+      '[TOOL] Anthropic tool_use emitted',
+    )
     const res = await result
     return {
       content: [{ type: 'text', text: res.text }],
@@ -357,8 +366,15 @@ export class SessionMcp {
     }
     const pending = this.requestIdToPending.get(messageId)
     if (!pending) return
-    if (ok) pending.delivered.resolve()
-    else pending.delivered.reject(error ?? new Error('Tool result delivery failed'))
+    if (ok) {
+      this.logger?.info?.(
+        { mcp_request_id: messageId, tool_use_id: pending.toolUseId },
+        '[TOOL] MCP result submitted',
+      )
+      pending.delivered.resolve()
+    } else {
+      pending.delivered.reject(error ?? new Error('Tool result delivery failed'))
+    }
   }
 }
 

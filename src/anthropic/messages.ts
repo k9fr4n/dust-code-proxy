@@ -418,6 +418,13 @@ async function streamTurn(
 ): Promise<void> {
   const messageId = randomId('msg')
 
+  if (resumeLastEventId !== undefined) {
+    request.log.info(
+      { conversation_id: conversationId, lastEventId: resumeLastEventId },
+      '[STREAM] resumed',
+    )
+  }
+
   reply.hijack()
   reply.raw.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -629,6 +636,14 @@ async function collectTurn(
   resumeLastEventId?: string,
 ): Promise<{ id: string; content: Record<string, unknown>[]; stopReason: string }> {
   const messageId = randomId('msg')
+
+  if (resumeLastEventId !== undefined) {
+    ctx.logger?.info?.(
+      { conversation_id: conversationId, lastEventId: resumeLastEventId },
+      '[STREAM] resumed',
+    )
+  }
+
   const translator = new StreamTranslator(messageId, model)
   const bridge = session.mcp as SessionMcp | undefined
   const disconnect = new AbortController()
