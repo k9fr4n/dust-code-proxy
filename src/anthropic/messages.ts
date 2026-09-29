@@ -57,7 +57,13 @@ function randomId(prefix: string): string {
 // ending the turn with `stop_reason: tool_use`. Dust dispatches parallel tools
 // within milliseconds; this lets every `tool_use` block reach Claude Code instead
 // of dropping all but the first.
-const TOOL_USE_FLUSH_DELAY_MS = 200
+// Debounce before a reply ends with `stop_reason: tool_use`, so that a whole batch
+// of parallel Dust tool calls lands in the same turn. Dust spreads a batch over
+// several hundred ms (observed up to ~815ms), so 200ms was far too tight and left
+// stragglers with no reply to be emitted on. Late calls are now queued and replayed
+// by the bridge, this window just keeps the common case in a single turn.
+const TOOL_USE_FLUSH_DELAY_MS =
+  Number.parseInt(process.env.TOOL_USE_FLUSH_DELAY_MS ?? '', 10) || 1500
 
 // How many times a dropped message-event stream is resumed before the turn fails.
 // Each resume re-opens the SSE stream from the last seen event id, so events already
