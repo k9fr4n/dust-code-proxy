@@ -33,6 +33,12 @@ interface PendingToolCall {
   requestId?: unknown
   resolve: (result: ToolCallResult) => void
   reject: (err: Error) => void
+  // Whether the `tool_use` block actually reached a streaming reply. A call can be
+  // parked before that happens, when Dust dispatches it after the current reply
+  // already closed; it is then replayed once the next reply attaches.
+  emitted: boolean
+  // Safety net for a queued call that no reply ever picks up.
+  queueTimer?: NodeJS.Timeout
   delivered: {
     promise: Promise<void>
     resolve: () => void
@@ -63,6 +69,10 @@ function deferred(): PendingToolCall['delivered'] {
     resolve = res
     reject = rej
   })
+  // A parked call can be torn down (bridge close, queue expiry) before anyone awaits
+  // its delivery, so mark the promise handled: an unobserved rejection here would
+  // otherwise surface as an unhandled rejection and can take the process down.
+  promise.catch(() => {})
   return { promise, resolve, reject }
 }
 
@@ -143,8 +153,67 @@ export class SessionMcp {
   }
 
   // Wire the active streaming reply so tool calls can emit `tool_use` blocks.
+  // Attaching a reply also flushes any call that arrived while none was active, so
+  // a tool_use dispatched by Dust between two turns is not lost.
   setEmitter(emitter: ToolUseEmitter | null): void {
     this.activeEmitter = emitter
+    if (!emitter) return
+    for (const pending of [...this.pending.values()]) {
+      if (pending.emitted) continue
+      if (!this.activeEmitter) break
+      this.emitOrQueue(pending)
+    }
+  }
+
+  // Emit a parked call's `tool_use` on the active reply, or keep it queued.
+  private emitOrQueue(pending: PendingToolCall): void {
+    if (!this.activeEmitter) {
+      this.logger?.warn?.(
+        { tool_use_id: pending.toolUseId, mcp_request_id: pending.requestId },
+        '[TOOL] no active reply; tool_use queued for the next turn',
+      )
+      this.armQueueTimeout(pending)
+      return
+    }
+    this.clearQueueTimeout(pending)
+    pending.emitted = true
+    this.activeEmitter.emitToolUse(pending.toolUseId, pending.name, pending.input)
+    this.logger?.info?.(
+      { tool_use_id: pending.toolUseId, mcp_request_id: pending.requestId },
+      '[TOOL] Anthropic tool_use emitted',
+    )
+  }
+
+  // A queued call still needs a bound: if no reply ever claims it, fail it back to
+  // Dust as a tool error so the generation moves on instead of parking until the
+  // stream's idle timeout kills the conversation.
+  private armQueueTimeout(pending: PendingToolCall): void {
+    if (pending.queueTimer) return
+    const ms = this.config.toolUseQueueTimeoutMs
+    pending.queueTimer = setTimeout(() => {
+      pending.queueTimer = undefined
+      if (pending.emitted) return
+      if (this.pending.get(pending.toolUseId) !== pending) return
+      this.pending.delete(pending.toolUseId)
+      if (pending.requestId != null) this.requestIdToPending.delete(pending.requestId)
+      this.logger?.error?.(
+        { tool_use_id: pending.toolUseId, mcp_request_id: pending.requestId, ms },
+        '[TOOL] queued tool_use expired; failing the call back to Dust',
+      )
+      pending.resolve({
+        text: `No Claude Code reply accepted this tool call within ${ms}ms.`,
+        isError: true,
+      })
+      pending.delivered.resolve()
+    }, ms)
+    pending.queueTimer.unref?.()
+  }
+
+  private clearQueueTimeout(pending: PendingToolCall): void {
+    if (pending.queueTimer) {
+      clearTimeout(pending.queueTimer)
+      pending.queueTimer = undefined
+    }
   }
 
   declareTools(tools: AnthropicTool[]): void {
@@ -260,6 +329,7 @@ export class SessionMcp {
     this.closed = true
     this.activeEmitter = null
     for (const p of this.pending.values()) {
+      this.clearQueueTimeout(p)
       const err = new Error('MCP bridge closed')
       p.reject(err)
       p.delivered.reject(err)
@@ -329,6 +399,7 @@ export class SessionMcp {
         'coerced tool input to match schema string fields',
       )
     }
+    let parked!: PendingToolCall
     const result = new Promise<ToolCallResult>((resolve, reject) => {
       const pending: PendingToolCall = {
         toolUseId,
@@ -337,19 +408,25 @@ export class SessionMcp {
         requestId,
         resolve,
         reject,
+        emitted: false,
         delivered: deferred(),
       }
+      parked = pending
       this.pending.set(toolUseId, pending)
       if (requestId != null) this.requestIdToPending.set(requestId, pending)
     })
     // Emit the tool_use block on the active streaming reply. Claude Code runs the
     // tool locally and returns a tool_result in its next request, which
     // `resolveToolResult` uses to settle this promise.
-    this.activeEmitter?.emitToolUse(toolUseId, name, sanitized)
-    this.logger?.info?.(
-      { tool_use_id: toolUseId, mcp_request_id: requestId },
-      '[TOOL] Anthropic tool_use emitted',
-    )
+    //
+    // Dust dispatches a batch of parallel tool calls as independent MCP requests
+    // spread over several hundred ms, while a reply ends on a short debounce after
+    // the first `tool_use`. A straggler therefore lands with no active reply: an
+    // optional-chained emit used to drop it silently, leaving the call parked
+    // forever. Dust then waited on a `tool_result` Claude Code never received,
+    // stopped emitting events, and the stream died on the idle timeout -- the
+    // conversation stopped mid-flight agent-side while Dust still showed it live.
+    this.emitOrQueue(parked)
     const res = await result
     return {
       content: [{ type: 'text', text: res.text }],

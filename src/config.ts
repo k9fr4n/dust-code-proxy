@@ -34,6 +34,10 @@ export interface Config {
   mcpServerName: string
   mcpHeartbeatIntervalMs: number
   mcpReconnectDelayMs: number
+  // How long a tool call dispatched by Dust may wait for a streaming reply to
+  // attach before it is failed back as a tool error instead of parking the
+  // generation until the stream's idle timeout fires.
+  toolUseQueueTimeoutMs: number
   timeouts: TimeoutConfig
 }
 
@@ -83,6 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mcpServerName: env.DUST_MCP_SERVER_NAME ?? 'claude-code-proxy',
     mcpHeartbeatIntervalMs: intValue(env.DUST_MCP_HEARTBEAT_INTERVAL_MS, 4 * 60 * 1000),
     mcpReconnectDelayMs: intValue(env.DUST_MCP_RECONNECT_DELAY_MS, 1 * 1000),
+    toolUseQueueTimeoutMs: intValue(env.TOOL_USE_QUEUE_TIMEOUT_MS, 60000),
     timeouts: {
       connectMs: intValue(env.DUST_CONNECT_TIMEOUT_MS, 10000),
       createMessageMs: intValue(env.DUST_CREATE_MESSAGE_TIMEOUT_MS, 30000),
