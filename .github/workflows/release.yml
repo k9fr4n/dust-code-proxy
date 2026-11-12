@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Multi-arch so the image also runs on arm64 (e.g. Raspberry Pi).
       - name: Set up QEMU
